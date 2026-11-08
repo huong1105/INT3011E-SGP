@@ -1,115 +1,71 @@
-# Social Golfer Problem (SGP) - Exact Solving Suite
+# Social Golfer Problem — SAT Solver
 
-Dự án Bài tập lớn số 2 (BTL2) môn **Các vấn đề hiện đại trong KHMT** - Trường Đại học Công nghệ, ĐHQGHN (VNU-UET).
+Phần SAT của BTL2 môn Các vấn đề hiện đại trong KHMT, VNU-UET.
+Code cung cấp bộ sinh CNF và runner độc lập để tích hợp với các phần của nhóm.
 
-Nghiên cứu và so sánh đối đầu các phương pháp giải chính xác (Exact Approaches) cho bài toán **Social Golfer Problem - SGP(w, g, s)**:
-- **SAT Solving:** Direct Encoding kết hợp 4 kỹ thuật AMO/Cardinality (*Sequential Counter, Commander, Binary, Product*) và *Order Encoding*.
-- **Constraint Programming (CP):** Google OR-Tools CP-SAT.
-- **Integer Linear Programming (ILP):** Gurobi Optimizer / OR-Tools MIP.
-- **Symmetry Breaking (SB):** SB1 (Fix Tuần 1), SB2 (Thứ tự nhóm), SB3 (Nội bộ nhóm), SB4 (Thứ tự tuần).
-- **Trực quan hóa:** Thư viện `cnsplots` / `matplotlib`.
+## Mô hình và encoding
 
----
+API nhận `SGP(w, g, s)`: `w` tuần, `g` nhóm mỗi tuần, `s` người mỗi nhóm;
+tổng số người là `g * s`. Nhãn `(g,p,w)` trong bài nguồn tương ứng `s=p`.
 
-## 👥 Thành viên nhóm & Phân công
-- **Thành viên 1:** Lead I/O, Solution Verifier, CP Solver (OR-Tools), CNSPlots & Báo cáo Elsevier.
-- **Thành viên 2:** 4 Bộ AMO/Cardinality Encoders (SeqCounter, Commander, Binary, Product), Đa SAT Solvers (CaDiCaL, Glucose, Kissat) & Quản lý GitHub.
-- **Thành viên 3:** Order Encoding, ILP Solver (Gurobi/MIP), 4 Kỹ thuật Symmetry Breaking (SB1–SB4) & Benchmark Suite.
+Mô hình dùng biến one-hot ba chỉ số theo NSE:
 
----
+- C1: mỗi người thuộc đúng một nhóm mỗi tuần, bằng ALO và pairwise AMO.
+- C2: mỗi nhóm có đúng `s` người, chọn một trong bốn encoding bên dưới.
+- C3: mỗi cặp người gặp nhau nhiều nhất một lần, bằng clause bốn literal âm.
 
-## 📁 Cấu trúc thư mục
-```text
-sgp-solver/
-│
-├── src/
-│   ├── __init__.py
-│   ├── io_utils.py           # [TV1] CLI parser, kiểm tra cận w_max, xuất DIMACS .cnf
-│   ├── verifier.py           # [TV1] Universal Solution Verifier kiểm tra tính đúng đắn
-│   ├── display.py            # [TV1] Định dạng bảng lịch thi đấu ma trận
-│   ├── cp_solver.py          # [TV1] Mô hình Google OR-Tools CP-SAT
-│   ├── sat_direct_encoders.py# [TV2] Direct Encoding + 4 bộ AMO (SeqCounter, Commander, Binary, Product)
-│   ├── sat_runner.py         # [TV2] Bộ chạy đa SAT Solvers (Cadical, Glucose, Kissat)
-│   ├── order_encoder.py      # [TV3] Mô hình Order Encoding
-│   ├── ilp_solver.py         # [TV3] Mô hình ILP (Gurobi/MIP)
-│   └── symmetry.py           # [TV3] 4 kỹ thuật SB1, SB2, SB3, SB4
-│
-├── benchmarks/               # [TV3 + TV1] Đo đạc và vẽ đồ thị khoa học
-│   ├── run_all.py            # Script chạy tự động toàn bộ test cases
-│   ├── plot_cns.py           # Script vẽ biểu đồ bằng cnsplots
-│   └── data/                 # Chứa dữ liệu kết quả đo đạc CSV
-│
-├── paper/                    # [Cả nhóm] Bản thảo bài báo khoa học Elsevier cas-sc
-│   ├── main.tex
-│   └── figures/
-│
-├── main.py                   # Điểm khởi chạy chương trình thống nhất (CLI)
-├── requirements.txt          # Các thư viện phụ thuộc
-└── README.md                 # Tài liệu hướng dẫn
+| `encoding` | Bộ mã hóa C2 |
+| --- | --- |
+| `nsc` | New Sequential Counter |
+| `seqcounter` | Sequential Counter |
+| `totalizer` | Totalizer |
+| `cardnetwrk` | Cardinality Network |
+
+Symmetry breaking được truyền riêng qua `symmetry_clauses`; bộ sinh không tự
+thêm ràng buộc symmetry của các module khác.
+
+## Cài đặt
+
+Chạy các lệnh từ thư mục gốc repository với Python 3.10 trở lên.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-sat.txt
 ```
 
----
+Trên Linux/macOS, kích hoạt bằng `source .venv/bin/activate`. File
+`requirements.txt` cài thêm dependency cho các phần khác của dự án.
 
-## 🚀 Cài đặt môi trường
-Yêu cầu Python 3.9 trở lên.
-```bash
-# 1. Tạo môi trường ảo
-python -m venv venv
+## Chạy SAT
 
-# Kích hoạt trên Windows:
-.\venv\Scripts\activate
-# Kích hoạt trên Linux/macOS:
-source venv/bin/activate
-
-# 2. Cài đặt các thư viện phụ thuộc
-pip install -r requirements.txt
+```powershell
+python -m src.sat_runner -w 3 -g 2 -s 2 --encoding nsc --solver cadical --timeout 10
+python -m src.sat_runner -w 3 -g 2 -s 2 --encoding totalizer --solver cadical --timeout 10 --json
 ```
 
----
+Hai solver: `cadical` (CaDiCaL 1.5.3) và `glucose` (Glucose 4.1). CLI SAT chạy trực tiếp bằng `src.sat_runner`.
+Mặc định CLI dùng `nsc`, `cadical` và timeout backend 60 giây.
 
-## 💻 Hướng dẫn chạy chương trình
+## Dùng trong code của nhóm
 
-### 1. Giải bằng SAT Solving (Mặc định: Direct + Sequential Counter + CaDiCaL)
-```bash
-python main.py -w 4 -g 3 -s 3 --method sat --amo seqcounter --solver cadical --sb full
+```python
+from src.sat_runner import solve_sgp
+
+result = solve_sgp(3, 2, 2, encoding="nsc", solver="cadical", timeout_seconds=10)
+print(result["status"])
+if result["status"] == "SAT":
+    assert result["verified"]
+    schedule = result["schedule"]
+    # schedule[week][group] là danh sách player; tất cả chỉ số bắt đầu từ 0.
 ```
 
-Các tùy chọn bộ mã hóa AMO/Cardinality (`--amo`):
-- `seqcounter`: Sequential Counter Encoding
-- `commander`: Commander Encoding
-- `binary`: Binary / Bitwise Encoding
-- `product`: Product Encoding
+Kết quả phân biệt `SAT`, `UNSAT`, `TIMEOUT`, `UNAVAILABLE`, `ERROR`.
+Runner kiểm tra model CNF và lịch SGP trước khi trả SAT có `verified=True`.
+`timeout_seconds` giới hạn khởi động backend, nạp CNF và solve; thời gian
+sinh CNF được ghi riêng trong `encode_time_seconds`. API mặc định không đặt timeout.
 
-Các tùy chọn SAT Solver (`--solver`):
-- `cadical`, `glucose`, `kissat`
-
-Tùy chọn Symmetry Breaking (`--sb`):
-- `none`: Không dùng SB
-- `sb1`: Chỉ cố định tuần 1
-- `full`: Toàn bộ SB1 + SB2 + SB3 + SB4
-
-### 2. Giải bằng Order Encoding
-```bash
-python main.py -w 4 -g 3 -s 3 --method order
-```
-
-### 3. Giải bằng Constraint Programming (CP-SAT)
-```bash
-python main.py -w 4 -g 3 -s 3 --method cp
-```
-
-### 4. Giải bằng Integer Linear Programming (ILP)
-```bash
-python main.py -w 4 -g 3 -s 3 --method ilp
-```
-
-### 5. Xuất file DIMACS .cnf (không chạy solver)
-```bash
-python main.py -w 4 -g 3 -s 3 --export-dimacs output.cnf
-```
-
-### 6. Chạy toàn bộ Benchmark & Vẽ biểu đồ
-```bash
-python benchmarks/run_all.py
-python benchmarks/plot_cns.py
-```
+Nếu chỉ cần CNF, dùng `encode_sgp(w, g, s, encoding=...)` trong
+`src.sat_direct_encoders`; hàm trả `(clauses, num_vars, stats)`.
+Nếu đã có CNF, gọi `solve_cnf(clauses, solver=..., timeout_seconds=...)`
+trong `src.sat_runner`.
