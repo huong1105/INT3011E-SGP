@@ -8,7 +8,13 @@ from typing import Any
 
 from src.cp_solver import solve_sgp_cp
 from src.display import print_result
-from src.io_utils import api_to_paper, export_dimacs, parse_args
+from src.io_utils import (
+    api_to_paper,
+    configure_safe_stdio,
+    export_dimacs,
+    parse_args,
+    safe_print,
+)
 from src.sat_direct_encoders import encode_sgp
 from src.sat_runner import solve_sgp
 from src.verifier import verify_schedule
@@ -62,7 +68,7 @@ def _run_sat(args: Any) -> dict[str, Any]:
             ],
         )
         if not args.json:
-            print(f"Exported DIMACS CNF to: {out_path}")
+            safe_print(f"Exported DIMACS CNF to: {out_path}")
 
     result = solve_sgp(
         args.weeks,
@@ -160,6 +166,7 @@ def _run_ilp(args: Any) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     """Điểm vào chính của CLI."""
+    configure_safe_stdio()
     args = parse_args(argv)
 
     dispatch = {
@@ -172,10 +179,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = dispatch[args.method](args)
     except NotImplementedError as exc:
-        print(f"[Not implemented] {exc}", file=sys.stderr)
+        safe_print(f"[Not implemented] {exc}", stream=sys.stderr)
         return 2
     except Exception as exc:
-        print(f"[Error] {exc}", file=sys.stderr)
+        safe_print(f"[Error] {exc}", stream=sys.stderr)
         return 1
 
     if args.json:

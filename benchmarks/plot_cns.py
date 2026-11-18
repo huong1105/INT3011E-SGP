@@ -484,8 +484,20 @@ def generate_all_plots(
     return saved
 
 
+def _configure_safe_stdio() -> None:
+    """Cấu hình stdout và stderr tránh lỗi encoding khi xuất đường dẫn Unicode."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="backslashreplace")
+            except Exception:
+                pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Chạy CLI vẽ biểu đồ CNSPlots."""
+    _configure_safe_stdio()
     parser = argparse.ArgumentParser(
         description="Generate SGP publication figures with CNSPlots (Cactus, Runtime Line, Bar)"
     )

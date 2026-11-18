@@ -12,7 +12,7 @@ import sys
 import time
 from typing import Any
 
-from .io_utils import VALID_SB_MODES, check_partner_bound
+from .io_utils import VALID_SB_MODES, check_partner_bound, configure_safe_stdio
 from .verifier import verify_schedule
 
 try:
@@ -318,6 +318,7 @@ def main(argv: list[str] | None = None) -> int:
     """Chạy CLI cho CP-SAT solver."""
     from .display import print_result
 
+    configure_safe_stdio()
     parser = argparse.ArgumentParser(description="Standalone OR-Tools CP-SAT solver for SGP")
     parser.add_argument("-w", type=int, required=True, help="number of weeks")
     parser.add_argument("-g", type=int, required=True, help="groups per week")

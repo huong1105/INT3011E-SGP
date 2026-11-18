@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import math
 from pathlib import Path
-from typing import Iterable, Sequence
+import sys
+from typing import Any, Iterable, Sequence
 
 VALID_METHODS = ("sat", "order", "cp", "ilp")
 VALID_C2_ENCODINGS = ("nsc", "seqcounter", "totalizer", "cardnetwrk")
@@ -128,6 +129,28 @@ def export_dimacs(
     content = format_dimacs(clauses, num_vars=num_vars, comments=comments)
     target.write_text(content, encoding="utf-8")
     return target
+
+
+def configure_safe_stdio() -> None:
+    """Cấu hình stdout và stderr tránh lỗi encoding khi xuất đường dẫn Unicode."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="backslashreplace")
+            except Exception:
+                pass
+
+
+def safe_print(message: str, stream: Any = None) -> None:
+    """In chuỗi an toàn theo encoding của stream."""
+    target = sys.stdout if stream is None else stream
+    try:
+        print(message, file=target)
+    except UnicodeEncodeError:
+        encoding = getattr(target, "encoding", None) or "ascii"
+        encoded = message.encode(encoding, errors="backslashreplace").decode(encoding)
+        print(encoded, file=target)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
