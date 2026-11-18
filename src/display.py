@@ -58,7 +58,7 @@ def format_schedule_table(
 ) -> str:
     """Định dạng lịch thành bảng ma trận."""
     if not schedule:
-        return "(Lịch trống)"
+        return "(Empty schedule)"
 
     offset = 1 if one_based else 0
     weeks = sorted(schedule.keys())

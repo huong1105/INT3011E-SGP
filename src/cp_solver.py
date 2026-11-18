@@ -319,14 +319,14 @@ def main(argv: list[str] | None = None) -> int:
     from .display import print_result
 
     parser = argparse.ArgumentParser(description="Standalone OR-Tools CP-SAT solver for SGP")
-    parser.add_argument("-w", type=int, required=True, help="Số tuần")
-    parser.add_argument("-g", type=int, required=True, help="Số nhóm mỗi tuần")
-    parser.add_argument("-s", type=int, required=True, help="Số người mỗi nhóm")
-    parser.add_argument("--sb", default="none", choices=VALID_SB_MODES, help="Symmetry breaking")
-    parser.add_argument("--timeout", type=float, default=60.0, help="Giới hạn thời gian (giây)")
-    parser.add_argument("--workers", type=int, default=None, help="Số luồng tìm kiếm CP-SAT")
-    parser.add_argument("--zero-based", action="store_true", help="Hiển thị người chơi từ 0")
-    parser.add_argument("--json", action="store_true", help="Xuất kết quả dạng JSON")
+    parser.add_argument("-w", type=int, required=True, help="number of weeks")
+    parser.add_argument("-g", type=int, required=True, help="groups per week")
+    parser.add_argument("-s", type=int, required=True, help="players per group")
+    parser.add_argument("--sb", default="none", choices=VALID_SB_MODES, help="symmetry breaking mode")
+    parser.add_argument("--timeout", type=float, default=60.0, help="wall-time limit in seconds")
+    parser.add_argument("--workers", type=int, default=None, help="CP-SAT search workers")
+    parser.add_argument("--zero-based", action="store_true", help="display 0-based player indices")
+    parser.add_argument("--json", action="store_true", help="print complete JSON result")
     args = parser.parse_args(argv)
 
     try:
@@ -342,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     if args.json:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        print(json.dumps(result, indent=2))
     else:
         print_result(result, one_based=not args.zero_based)
 

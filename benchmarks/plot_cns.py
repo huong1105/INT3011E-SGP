@@ -25,6 +25,16 @@ C2_ENCODING_LABELS = {
 
 C2_ENCODING_ORDER = ["NSC", "Sequential Counter", "Totalizer", "Cardinality Network"]
 
+SOLVER_DISPLAY_NAMES = {
+    "cadical": "CaDiCaL",
+    "glucose": "Glucose",
+    "cp-sat": "OR-Tools CP-SAT",
+    "ortools": "OR-Tools CP-SAT",
+    "ortools-cp-sat": "OR-Tools CP-SAT",
+    "gurobi": "Gurobi",
+    "cplex": "CPLEX",
+}
+
 METHOD_SOLVER_LABELS = {
     ("sat", "cadical"): "SAT (CaDiCaL)",
     ("sat", "glucose"): "SAT (Glucose)",
@@ -36,6 +46,18 @@ METHOD_SOLVER_LABELS = {
     ("ilp", "gurobi"): "ILP (Gurobi)",
     ("ilp", "cplex"): "ILP (CPLEX)",
 }
+
+
+def _format_solver_name(solver: str) -> str:
+    """Trả về tên hiển thị chuẩn của solver."""
+    key = solver.strip().lower()
+    return SOLVER_DISPLAY_NAMES.get(key, solver.strip() or "unknown")
+
+
+def _format_sat_label(sat_solver: str) -> str:
+    """Trả về nhãn hiển thị cho nhánh SAT theo solver được chọn."""
+    key = sat_solver.strip().lower()
+    return METHOD_SOLVER_LABELS.get(("sat", key), f"SAT ({_format_solver_name(sat_solver)})")
 
 TIME_COLUMN_CANDIDATES = (
     "solver_wall_time_seconds",
@@ -63,11 +85,11 @@ def load_results(csv_path: str | Path) -> pd.DataFrame:
     """Đọc và chuẩn hóa file results.csv."""
     path = Path(csv_path)
     if not path.exists():
-        raise FileNotFoundError(f"Không tìm thấy file dữ liệu thực nghiệm: {path}")
+        raise FileNotFoundError(f"Benchmark CSV file not found: {path}")
 
     df = pd.read_csv(path)
     if df.empty:
-        raise ValueError(f"File dữ liệu rỗng: {path}")
+        raise ValueError(f"Benchmark CSV file is empty: {path}")
 
     df = df.copy()
     rename_map: dict[str, str] = {}
@@ -75,7 +97,7 @@ def load_results(csv_path: str | Path) -> pd.DataFrame:
     time_col = _resolve_column(df, TIME_COLUMN_CANDIDATES)
     if time_col is None:
         raise ValueError(
-            f"Không tìm thấy cột thời gian trong CSV. Các cột hiện có: {list(df.columns)}"
+            f"No runtime column found in CSV. Available columns: {list(df.columns)}"
         )
     if time_col != "solve_time":
         rename_map[time_col] = "solve_time"
@@ -159,9 +181,10 @@ def plot_cactus(
     if sb is not None:
         solved = solved[solved["sb"] == sb.lower()]
 
+    sat_label = _format_sat_label(sat_solver)
     groups: list[tuple[str, pd.DataFrame]] = [
         (
-            "SAT (CaDiCaL)",
+            sat_label,
             solved[
                 (solved["method"] == "sat")
                 & (solved["solver"] == sat_solver.lower())
@@ -177,8 +200,9 @@ def plot_cactus(
     for label, sub in groups:
         if sub.empty:
             continue
+        per_instance = sub.groupby("instance", as_index=False)["solve_time"].mean()
         hue_order.append(label)
-        sorted_times = sub["solve_time"].sort_values().to_numpy()
+        sorted_times = per_instance["solve_time"].sort_values().to_numpy()
         for idx, t in enumerate(sorted_times, start=1):
             rows.append(
                 {
@@ -189,7 +213,7 @@ def plot_cactus(
             )
 
     if not rows:
-        print("[Cảnh báo] Không đủ dữ liệu để vẽ Cactus Plot (SAT vs CP vs ILP).")
+        print("[Warning] Not enough data to generate Cactus Plot (SAT vs CP vs ILP).")
         return []
 
     plot_df = pd.DataFrame(rows)
@@ -210,7 +234,7 @@ def plot_cactus(
     ax.set_yscale("log")
     ax.set_xlabel("Number of Solved Instances")
     ax.set_ylabel("Solve Time (s, log scale)")
-    ax.set_title("Cactus Plot: SAT vs. CP-SAT vs. ILP on SGP")
+    ax.set_title(f"Cactus Plot: {sat_label} vs. CP-SAT vs. ILP on SGP")
     ax.grid(True, which="both", linestyle="--", alpha=0.35)
     cns.take_legend_out()
 
@@ -235,15 +259,18 @@ def plot_c2_encodings(
 
     if sub.empty:
         print(
-            f"[Cảnh báo] Không đủ dữ liệu SAT ({sat_solver}, sb={sb}) để vẽ Runtime Line Plot 4 bộ C2."
+            f"[Warning] Not enough SAT data ({sat_solver}, sb={sb}) to generate C2 encodings plot."
         )
         return []
 
     sub["C2 Encoding"] = sub["encoding"].map(C2_ENCODING_LABELS)
     sub["solve_time"] = sub["solve_time"].clip(lower=MIN_LOG_TIME)
 
+    per_instance = sub.groupby(["n", "instance", "C2 Encoding"], as_index=False)[
+        "solve_time"
+    ].mean()
     agg = (
-        sub.groupby(["n", "C2 Encoding"], as_index=False)["solve_time"]
+        per_instance.groupby(["n", "C2 Encoding"], as_index=False)["solve_time"]
         .mean()
         .sort_values("n")
     )
@@ -263,9 +290,10 @@ def plot_c2_encodings(
         errorbar=None,
     )
     ax.set_yscale("log")
-    ax.set_xlabel("Number of Golfers (n = g × s)")
+    ax.set_xlabel(r"Number of Golfers ($n = g \times s$)")
     ax.set_ylabel("Mean Solve Time (s, log scale)")
-    ax.set_title(f"C2 Exactly-s Encodings Comparison ({sat_solver.upper()}, SB={sb})")
+    solver_name = _format_solver_name(sat_solver)
+    ax.set_title(f"C2 Exactly-s Encodings Comparison ({solver_name}, SB={sb})")
     ax.grid(True, which="both", linestyle="--", alpha=0.35)
     cns.take_legend_out()
 
@@ -299,18 +327,23 @@ def plot_direct_vs_order(
 
     if direct.empty or order.empty:
         print(
-            "[Cảnh báo] Thiếu dữ liệu Direct hoặc Order Encoding nên bỏ qua Bar Plot so sánh."
+            "[Warning] Missing Direct or Order Encoding data; skipping Direct vs. Order bar plot."
         )
         return []
 
     common_instances = sorted(set(direct["instance"]) & set(order["instance"]))
     if not common_instances:
-        print("[Cảnh báo] Không có instance chung giữa Direct và Order Encoding để vẽ Bar Plot.")
+        print(
+            "[Warning] No common instances between Direct and Order Encoding; skipping bar plot."
+        )
         return []
 
     combined = pd.concat([direct, order], ignore_index=True)
     combined = combined[combined["instance"].isin(common_instances)].copy()
     combined["solve_time"] = combined["solve_time"].clip(lower=MIN_LOG_TIME)
+    combined = combined.groupby(["instance", "n", "Approach"], as_index=False, dropna=False)[
+        "solve_time"
+    ].mean()
 
     inst_order = (
         combined[["instance", "n"]]
@@ -332,7 +365,8 @@ def plot_direct_vs_order(
     ax.set_yscale("log")
     ax.set_xlabel("SGP Instance (g-p-w)")
     ax.set_ylabel("Solve Time (s, log scale)")
-    ax.set_title("Direct Encoding vs. Order Encoding Runtime")
+    solver_name = _format_solver_name(sat_solver)
+    ax.set_title(f"Direct vs. Order Encoding Runtime ({solver_name})")
     ax.tick_params(axis="x", rotation=35)
     ax.grid(True, axis="y", which="both", linestyle="--", alpha=0.35)
     cns.take_legend_out()
@@ -453,40 +487,40 @@ def generate_all_plots(
 def main(argv: Sequence[str] | None = None) -> int:
     """Chạy CLI vẽ biểu đồ CNSPlots."""
     parser = argparse.ArgumentParser(
-        description="Vẽ biểu đồ khoa học SGP bằng CNSPlots (Cactus, Runtime Line, Bar)"
+        description="Generate SGP publication figures with CNSPlots (Cactus, Runtime Line, Bar)"
     )
     parser.add_argument(
         "--input",
         type=str,
         default="benchmarks/results.csv",
-        help="Đường dẫn file CSV kết quả thực nghiệm (mặc định: benchmarks/results.csv)",
+        help="Path to benchmark results CSV (default: benchmarks/results.csv)",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
         default="paper/figures",
-        help="Thư mục lưu hình vẽ PDF/PNG (mặc định: paper/figures)",
+        help="Output directory for PDF/PNG figures (default: paper/figures)",
     )
     parser.add_argument(
         "--sat-encoding",
         default="nsc",
         choices=tuple(C2_ENCODING_LABELS.keys()),
-        help="Bộ mã hóa SAT đại diện cho Cactus/Bar plot (mặc định: nsc)",
+        help="Representative SAT C2 encoding for Cactus/Bar plots (default: nsc)",
     )
     parser.add_argument(
         "--sat-solver",
         default="cadical",
-        help="SAT solver dùng để so sánh (mặc định: cadical)",
+        help="SAT solver to plot (default: cadical)",
     )
     parser.add_argument(
         "--sb",
         default="none",
-        help="Cấu hình SB lọc khi vẽ biểu đồ (mặc định: none)",
+        help="Symmetry breaking mode filter (default: none)",
     )
     parser.add_argument(
         "--demo",
         action="store_true",
-        help="Dùng dữ liệu mô phỏng để kiểm thử script vẽ khi chưa có results.csv",
+        help="Use synthetic demo data when benchmarks/results.csv is not yet available",
     )
     args = parser.parse_args(argv)
 
@@ -506,12 +540,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     if saved_files:
-        print("Đã xuất thành công các biểu đồ CNSPlots:")
+        print("Exported CNSPlots figures:")
         for path in saved_files:
             print(f"  - {path}")
         return 0
 
-    print("Không có biểu đồ nào được xuất.")
+    print("No figures were exported.")
     return 1
 
 

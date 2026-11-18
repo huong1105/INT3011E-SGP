@@ -92,14 +92,14 @@ def verify_schedule(
 
     errors: list[str] = []
     if not isinstance(schedule, dict):
-        return False, ["Schedule phải là dict dạng schedule[week][group] -> list[player]"]
+        return False, ["Schedule must be a dict: schedule[week][group] -> list[player]"]
 
     expected_weeks = set(range(w))
     if any(isinstance(k, bool) or not isinstance(k, int) for k in schedule):
-        return False, ["Chỉ số tuần phải là số nguyên 0-based"]
+        return False, ["Week indices must be 0-based integers"]
     if set(schedule.keys()) != expected_weeks:
         return False, [
-            f"Tập tuần không hợp lệ: nhận {sorted(schedule.keys())}, yêu cầu 0..{w - 1}"
+            f"Invalid week keys: got {sorted(schedule.keys())}, expected 0..{w - 1}"
         ]
 
     n = g * s
@@ -110,14 +110,14 @@ def verify_schedule(
     for week in range(w):
         groups = schedule[week]
         if not isinstance(groups, dict):
-            errors.append(f"Tuần {week}: cấu trúc nhóm phải là dict")
+            errors.append(f"Week {week}: groups must be a dict")
             continue
         if any(isinstance(j, bool) or not isinstance(j, int) for j in groups):
-            errors.append(f"Tuần {week}: chỉ số nhóm phải là số nguyên 0-based")
+            errors.append(f"Week {week}: group indices must be 0-based integers")
             continue
         if set(groups.keys()) != expected_groups:
             errors.append(
-                f"Tuần {week}: tập nhóm không hợp lệ (nhận {sorted(groups.keys())}, yêu cầu 0..{g - 1})"
+                f"Week {week}: invalid group keys (got {sorted(groups.keys())}, expected 0..{g - 1})"
             )
             continue
 
@@ -126,13 +126,13 @@ def verify_schedule(
             members = groups[group]
             if not isinstance(members, (list, tuple)):
                 errors.append(
-                    f"Tuần {week}, Nhóm {group}: danh sách người chơi phải là list hoặc tuple"
+                    f"Week {week}, Group {group}: members must be a list or tuple"
                 )
                 continue
 
             if len(members) != s:
                 errors.append(
-                    f"Luật 2 - Tuần {week}, Nhóm {group}: có {len(members)} người (yêu cầu {s})"
+                    f"Rule 2 - Week {week}, Group {group}: size {len(members)} (expected {s})"
                 )
 
             invalid_members = [
@@ -142,14 +142,14 @@ def verify_schedule(
             ]
             if invalid_members:
                 errors.append(
-                    f"Luật 2 - Tuần {week}, Nhóm {group}: chứa người chơi ngoài miền 0..{n - 1}: {invalid_members}"
+                    f"Rule 2 - Week {week}, Group {group}: players out of range 0..{n - 1}: {invalid_members}"
                 )
                 continue
 
             if len(set(members)) != len(members):
                 dup_in_group = [p for p, cnt in Counter(members).items() if cnt > 1]
                 errors.append(
-                    f"Luật 1/2 - Tuần {week}, Nhóm {group}: người chơi bị trùng trong cùng nhóm: {dup_in_group}"
+                    f"Rule 1/2 - Week {week}, Group {group}: duplicate players in group: {dup_in_group}"
                 )
 
             week_players.extend(members)
@@ -159,8 +159,8 @@ def verify_schedule(
                 if pair in met_pairs:
                     prev_week, prev_group = met_pairs[pair]
                     errors.append(
-                        f"Luật 3 - Cặp ({p1}, {p2}) gặp lại ở Tuần {week} Nhóm {group} "
-                        f"(đã gặp ở Tuần {prev_week} Nhóm {prev_group})"
+                        f"Rule 3 - Pair ({p1}, {p2}) repeated at Week {week} Group {group} "
+                        f"(previously met at Week {prev_week} Group {prev_group})"
                     )
                 else:
                     met_pairs[pair] = (week, group)
@@ -169,10 +169,10 @@ def verify_schedule(
         missing = sorted(expected_players - set(counts.keys()))
         duplicates = sorted(p for p, cnt in counts.items() if cnt > 1)
         if missing:
-            errors.append(f"Luật 1 - Tuần {week}: thiếu người chơi {missing}")
+            errors.append(f"Rule 1 - Week {week}: missing players {missing}")
         if duplicates:
             errors.append(
-                f"Luật 1 - Tuần {week}: người chơi xuất hiện nhiều hơn 1 lần {duplicates}"
+                f"Rule 1 - Week {week}: players appear more than once {duplicates}"
             )
 
     return len(errors) == 0, errors

@@ -26,7 +26,7 @@ def _load_symmetry_clauses(
     try:
         from src import symmetry as sb_module
     except ImportError as exc:
-        raise RuntimeError(f"Không thể import src.symmetry: {exc}") from exc
+        raise RuntimeError(f"Could not import src.symmetry: {exc}") from exc
 
     for fn_name in ("generate_symmetry_clauses", "encode_symmetry", "get_symmetry_clauses"):
         fn = getattr(sb_module, fn_name, None)
@@ -34,7 +34,7 @@ def _load_symmetry_clauses(
             return fn(w, g, s, mode=sb)
 
     raise NotImplementedError(
-        f"Cờ --sb {sb} cần module src/symmetry.py (do TV3 phụ trách), hiện chưa được triển khai."
+        f"Flag --sb {sb} requires src/symmetry.py, which is not yet implemented."
     )
 
 
@@ -62,7 +62,7 @@ def _run_sat(args: Any) -> dict[str, Any]:
             ],
         )
         if not args.json:
-            print(f"Đã xuất file DIMACS CNF tại: {out_path}")
+            print(f"Exported DIMACS CNF to: {out_path}")
 
     result = solve_sgp(
         args.weeks,
@@ -84,7 +84,7 @@ def _run_sat(args: Any) -> dict[str, Any]:
         result["verification_errors"] = errors
         if not valid:
             result["status"] = "ERROR"
-            result["error"] = "Universal Verifier phát hiện nghiệm SAT không hợp lệ"
+            result["error"] = "Universal Verifier rejected SAT schedule"
 
     return result
 
@@ -108,7 +108,7 @@ def _run_order(args: Any) -> dict[str, Any]:
     solver_fn = getattr(order_encoder, "solve_sgp_order", None)
     if not callable(solver_fn):
         raise NotImplementedError(
-            "Phương pháp --method order cần src/order_encoder.py (do TV3 phụ trách), hiện chưa triển khai."
+            "Method --method order requires src/order_encoder.py, which is not yet implemented."
         )
     result = solver_fn(
         args.weeks,
@@ -126,7 +126,7 @@ def _run_order(args: Any) -> dict[str, Any]:
         result["verification_errors"] = errors
         if not valid:
             result["status"] = "ERROR"
-            result["error"] = "Universal Verifier phát hiện nghiệm Order Encoding không hợp lệ"
+            result["error"] = "Universal Verifier rejected Order Encoding schedule"
     return result
 
 
@@ -137,7 +137,7 @@ def _run_ilp(args: Any) -> dict[str, Any]:
     solver_fn = getattr(ilp_solver, "solve_sgp_ilp", None)
     if not callable(solver_fn):
         raise NotImplementedError(
-            "Phương pháp --method ilp cần src/ilp_solver.py (do TV3 phụ trách), hiện chưa triển khai."
+            "Method --method ilp requires src/ilp_solver.py, which is not yet implemented."
         )
     result = solver_fn(
         args.weeks,
@@ -154,7 +154,7 @@ def _run_ilp(args: Any) -> dict[str, Any]:
         result["verification_errors"] = errors
         if not valid:
             result["status"] = "ERROR"
-            result["error"] = "Universal Verifier phát hiện nghiệm ILP không hợp lệ"
+            result["error"] = "Universal Verifier rejected ILP schedule"
     return result
 
 
@@ -172,14 +172,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = dispatch[args.method](args)
     except NotImplementedError as exc:
-        print(f"[Chưa triển khai] {exc}", file=sys.stderr)
+        print(f"[Not implemented] {exc}", file=sys.stderr)
         return 2
     except Exception as exc:
-        print(f"[Lỗi] {exc}", file=sys.stderr)
+        print(f"[Error] {exc}", file=sys.stderr)
         return 1
 
     if args.json:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        print(json.dumps(result, indent=2))
     else:
         print_result(
             result,

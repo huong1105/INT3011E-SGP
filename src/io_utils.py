@@ -135,16 +135,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Social Golfer Problem (SGP) Unified Solver CLI (SAT / Order / CP / ILP)"
     )
-    parser.add_argument("-w", "--weeks", type=int, required=True, help="Số tuần thi đấu (w >= 1)")
-    parser.add_argument("-g", "--groups", type=int, required=True, help="Số nhóm mỗi tuần (g >= 1)")
+    parser.add_argument("-w", "--weeks", type=int, required=True, help="number of weeks (w >= 1)")
+    parser.add_argument("-g", "--groups", type=int, required=True, help="groups per week (g >= 1)")
     parser.add_argument(
-        "-s", "--size", type=int, required=True, help="Số người mỗi nhóm (s >= 1, bài nguồn ký hiệu p)"
+        "-s", "--size", type=int, required=True, help="players per group (s >= 1, paper label p)"
     )
     parser.add_argument(
         "--method",
         default="sat",
         choices=VALID_METHODS,
-        help="Phương pháp giải: sat, order, cp, ilp (mặc định: sat)",
+        help="solving method: sat, order, cp, ilp (default: sat)",
     )
     parser.add_argument(
         "--amo",
@@ -152,52 +152,52 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="amo",
         default="nsc",
         choices=VALID_C2_ENCODINGS,
-        help="Bộ mã hóa Exactly-s cho C2 (mặc định: nsc)",
+        help="C2 Exactly-s encoding (default: nsc)",
     )
     parser.add_argument(
         "--solver",
         default=None,
         choices=VALID_SOLVERS,
-        help="Solver cụ thể (cadical, glucose, cp-sat, gurobi); để trống sẽ tự chọn theo --method",
+        help="solver backend (cadical, glucose, cp-sat, gurobi); defaults by --method",
     )
     parser.add_argument(
         "--sb",
         default="none",
         choices=VALID_SB_MODES,
-        help="Cấu hình Symmetry Breaking: none, sb1, full (SB1+SB2 nguồn; mặc định: none)",
+        help="symmetry breaking mode: none, sb1, full (default: none)",
     )
     parser.add_argument(
         "--timeout",
         type=float,
         default=60.0,
-        help="Giới hạn wall-time giải theo giây (mặc định: 60.0)",
+        help="wall-time limit in seconds (default: 60.0)",
     )
     parser.add_argument(
         "--workers",
         type=int,
         default=None,
-        help="Số luồng tìm kiếm cho OR-Tools CP-SAT (tùy chọn, mặc định dùng cấu hình solver)",
+        help="search workers for OR-Tools CP-SAT (optional)",
     )
     parser.add_argument(
         "--export-cnf",
         type=str,
         default=None,
-        help="Đường dẫn xuất file DIMACS .cnf (áp dụng khi chạy phương pháp SAT)",
+        help="output path for DIMACS .cnf export (when --method sat)",
     )
     parser.add_argument(
         "--zero-based",
         action="store_true",
-        help="Hiển thị chỉ số người chơi bắt đầu từ 0 thay vì 1",
+        help="display 0-based player indices instead of 1-based",
     )
     parser.add_argument(
         "--no-schedule",
         action="store_true",
-        help="Không in bảng lịch thi đấu, chỉ in tóm tắt kết quả",
+        help="suppress schedule matrix output and print summary only",
     )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Xuất toàn bộ kết quả dưới dạng JSON",
+        help="print the complete JSON result",
     )
     return parser
 
@@ -209,24 +209,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
     for name, value in (("w", args.weeks), ("g", args.groups), ("s", args.size)):
         if value < 1:
-            parser.error(f"Tham số -{name} phải là số nguyên dương (nhận {value})")
+            parser.error(f"Parameter -{name} must be a positive integer (got {value})")
 
     if args.timeout is not None and (not math.isfinite(args.timeout) or args.timeout <= 0):
-        parser.error("--timeout phải là số thực dương hữu hạn")
+        parser.error("--timeout must be a finite positive number")
 
     if args.workers is not None and args.workers < 1:
-        parser.error("--workers phải là số nguyên dương")
+        parser.error("--workers must be a positive integer")
 
     if args.solver is None:
         args.solver = DEFAULT_SOLVER_BY_METHOD[args.method]
     else:
         if args.method in ("sat", "order") and args.solver not in ("cadical", "glucose"):
             parser.error(
-                f"Phương pháp --method {args.method} chỉ hỗ trợ --solver cadical hoặc glucose"
+                f"Method --method {args.method} only supports --solver cadical or glucose"
             )
         if args.method == "cp" and args.solver != "cp-sat":
-            parser.error("Phương pháp --method cp chỉ hỗ trợ --solver cp-sat")
+            parser.error("Method --method cp only supports --solver cp-sat")
         if args.method == "ilp" and args.solver != "gurobi":
-            parser.error("Phương pháp --method ilp chỉ hỗ trợ --solver gurobi")
+            parser.error("Method --method ilp only supports --solver gurobi")
 
     return args
