@@ -1,5 +1,6 @@
 """Mã hóa SGP thành CNF bằng mô hình ba chỉ số và bốn bộ Exactly-s."""
 
+from collections.abc import Iterable, Mapping
 from itertools import combinations, product as iter_product
 from pysat.card import CardEnc, EncType
 
@@ -252,7 +253,7 @@ def encode_c3(n: int, g: int, w: int) -> list[list[int]]:
 
 def encode_sgp(w: int, g: int, s: int,
                encoding: str = 'nsc',
-               symmetry_clauses: list[list[int]] | None = None
+               symmetry_clauses: Iterable[Iterable[int]] | None = None
                ) -> tuple[list[list[int]], int, dict]:
     """Mã hóa SGP(w,g,s), trả (clauses, num_vars, stats); symmetry dùng biến chính."""
     for name, value in (("w", w), ("g", g), ("s", s)):
@@ -262,8 +263,14 @@ def encode_sgp(w: int, g: int, s: int,
     n_primary = num_primary_vars(n, g, w)
     sb_clauses = []
     if symmetry_clauses is not None:
+        invalid_container_types = (str, bytes, bytearray, Mapping)
+        if isinstance(symmetry_clauses, invalid_container_types):
+            raise ValueError("symmetry_clauses must contain iterable clauses")
         try:
-            sb_clauses = [list(clause) for clause in symmetry_clauses]
+            for clause in symmetry_clauses:
+                if isinstance(clause, invalid_container_types):
+                    raise ValueError("symmetry_clauses must contain iterable clauses")
+                sb_clauses.append(list(clause))
         except TypeError as exc:
             raise ValueError("symmetry_clauses must contain iterable clauses") from exc
         for clause in sb_clauses:

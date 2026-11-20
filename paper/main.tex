@@ -19,6 +19,7 @@
     }
 }
 \RenewDocumentCommand \printorcid { } { }
+\IfFileExists{thumbnails/cas-email.jpeg}{}{\bool_gset_true:N \g_stm_nologo_bool}
 
 \cs_set:Npn \__reset_fig:
 {
@@ -106,7 +107,7 @@
 \cormark[1]
 \ead{24021470@vnu.edu.vn}
 
-\author[1]{[Member 2 Full Name -- Huong]}
+\author[1]{Pham Van Huong}
 \ead{24021510@vnu.edu.vn}
 
 \author[1]{[Member 3 Full Name]}
@@ -120,7 +121,8 @@
 \cortext[1]{Corresponding author (Student ID: 24021470). Group report for Course INT3011E -- Advanced Topics in Computer Science. Supervisor: Dr. To Van Khanh.}
 
 \begin{abstract}
-The Social Golfer Problem (SGP) is a classic NP-complete combinatorial scheduling problem that asks whether $n = g \times s$ players can be partitioned into $g$ groups of size $s$ over $w$ weeks such that no two players share a group more than once. Despite its concise statement, solving the SGP at scale remains challenging due to rapid combinatorial growth and pervasive structural symmetries across players, groups, and weeks. In this study, we present a systematic empirical investigation of exact solving paradigms for the SGP. Building upon a compact three-index one-hot Boolean model, we conduct an ablation study of four \textit{Exactly}-$s$ cardinality encodings for the Group Size constraint: the New Sequential Counter (NSC), Sinz's Sequential Counter, Totalizer, and Cardinality Network, evaluated with both CaDiCaL~1.5.3 and Glucose~4.1 via PySAT. We further examine an Order Encoding formulation and static symmetry-breaking constraints (SB1 and SB2), and compare SAT against two exact baseline paradigms: Constraint Programming (Google OR-Tools CP-SAT using global \texttt{AllDifferent}, \texttt{Inverse}, and \texttt{AtMostOne} constraints) and Integer Linear Programming (Gurobi Optimizer). All produced schedules are independently certified by a standalone Universal Verifier, and theoretical partner-bound infeasibility is filtered before solver invocation. Evaluated across [TBD] benchmark instances (including the 66 established instances from the literature and boundary cases) under a [TBD]-second cutoff, our results show that [TBD: summary of solved instance counts, runtime advantage of NSC vs.\ alternative C2 encodings, Direct vs.\ Order Encoding comparison, and SAT vs.\ CP-SAT vs.\ ILP trade-offs].
+The Social Golfer Problem (SGP) asks whether $gs$ players can be assigned to $g$ groups of size $s$ for $w$ weeks with no repeated pair. We implement a three-index SAT model and compare four encodings of the group-size equality: New Sequential Counter, Sequential Counter, Totalizer, and Cardinality Network. We check the effect of changing only this equality encoding on CNF size and screen the four encodings with CaDiCaL~1.5.3 and Glucose~4.1. The SAT runner validates each Boolean model and its decoded schedule. In a resource-bounded screen of 528 configurations from 66 reference instances, 102 returned verified SAT and 56 were ruled out by the partner bound. The remaining configurations either timed out (106) or were skipped by the clause-count policy (264).
+The report also describes the CP-SAT baseline and the protocol for a later controlled comparison with Order Encoding, symmetry breaking, and exact CP and MIP solvers.
 \end{abstract}
 
 \begin{keywords}
@@ -132,7 +134,7 @@ Social Golfer Problem \sep SAT encoding \sep Cardinality constraints \sep New Se
 \section{Introduction}
 \label{sec:introduction}
 
-Combinatorial timetabling and grouping problems arise frequently in discrete mathematics, operations research, and automated reasoning \cite{colbourn2006handbook,biere2021handbook}. Among them, the \textbf{Social Golfer Problem (SGP)}---cataloged as \textbf{CSPLib problem~010} \cite{harvey2001csplib}---is one of the most recognized benchmarks for evaluating exact constraint solvers. Given $g$ groups of $p$ players each (for a total of $n = g \times p$ golfers) and a planning horizon of $w$ weeks, the decision version of the SGP asks whether a weekly grouping exists such that every player plays once per week and no two players appear in the same group more than once across all $w$ weeks. Harvey and Winterer proved the decision version to be NP-complete \cite{harvey2005molr}, while the corresponding optimization variant (maximizing $w$ for fixed $g$ and $p$) is NP-hard.
+Combinatorial timetabling and grouping problems arise frequently in discrete mathematics, operations research, and automated reasoning \cite{colbourn2006handbook,biere2021handbook}. Among them, the \textbf{Social Golfer Problem (SGP)}---cataloged as \textbf{CSPLib problem~010} \cite{harvey2001csplib}---is one of the most recognized benchmarks for evaluating exact constraint solvers. Given $g$ groups of $p$ players each (for a total of $n = g \times p$ golfers) and a planning horizon of $w$ weeks, the decision version of the SGP asks whether a weekly grouping exists such that every player plays once per week and no two players appear in the same group more than once across all $w$ weeks. The complexity of this decision problem without preassigned players remains open. The completion variant, which starts from a partially assigned schedule, is NP-complete~\cite{triska2012tme,verplancke2026}.
 
 The computational difficulty of the SGP stems from two intertwined phenomena: super-exponential combinatorial explosion and massive solution symmetry \cite{gent2002cp,triska2012tme}. By arranging $n = g \times p$ players independently in each week and factoring out intra-group player orderings, intra-week group orderings, and week permutations, an approximate count of distinct schedules is given by $\frac{((g \times p)!)^w}{(p!)^{gw} \times (g!)^w \times w!}$ \cite{kieu2025nse}. Even for moderate parameter values, exhaustive search traverses vast numbers of symmetrically equivalent assignments unless symmetry is broken either structurally in the model or explicitly via symmetry-breaking constraints \cite{walsh2006symmetry}.
 
@@ -148,12 +150,12 @@ To solve the SGP, researchers have explored four principal methodological famili
 
 In the literature, standard SGP instances are labeled by the triple $g\text{-}p\text{-}w$ (groups, players per group, weeks). Throughout our software architecture and API, we parameterize instances by $(w, g, s)$ with group size $s = p$ and $n = g \times s$; for example, the canonical instance \texttt{2-2-3} corresponds to $\text{SGP}(w=3, g=2, s=2)$.
 
-In this report, we present a unified implementation and empirical comparison of exact solvers for the SGP. Our main contributions are summarized as follows:
+This report presents an implementation and initial evaluation of the three-index SAT model, along with the CP-SAT baseline. Our main contributions are summarized as follows:
 \begin{enumerate}[label=(\arabic*),noitemsep]
     \item \textbf{Controlled Ablation of \textit{Exactly}-$s$ Cardinality Encodings}: Adopting the three-index one-hot Boolean representation with fixed group-assignment (C1) and unique-pairing (C3) constraints, we systematically compare four Group Size (C2) encodings---NSC \cite{kieu2025nse}, Sequential Counter \cite{sinz2005towards}, Totalizer \cite{bailleux2003totalizer}, and Cardinality Network \cite{asin2009cardnet}---across two CDCL solvers (CaDiCaL~1.5.3 and Glucose~4.1).
-    \item \textbf{Order Encoding and Symmetry Breaking}: We formulate and evaluate an Order Encoding alternative \cite{tamura2009order} alongside static symmetry-breaking constraints (SB1 and SB2) \cite{kieu2025nse} to quantify the impact of representation and symmetry reduction.
-    \item \textbf{Exact Cross-Paradigm Baseline Comparison}: We design and implement a Constraint Programming model in Google OR-Tools CP-SAT (combining \texttt{AllDifferent}, \texttt{Inverse}, and \texttt{AtMostOne}) and an ILP formulation in Gurobi Optimizer, enabling direct comparison against SAT on identical instances and cutoffs.
-    \item \textbf{Unified Pipeline and Independent Verification}: We provide a common CLI, DIMACS CNF exporter, theoretical partner-bound precheck, standalone Universal Verifier checking all three SGP invariants, and reproducible scientific visualization using \texttt{cnsplots}.
+    \item \textbf{Order Encoding and Symmetry Breaking}: We outline Order Encoding~\cite{tamura2009order} and static symmetry breaking (SB1 and SB2)~\cite{kieu2025nse} for a follow-up comparison.
+    \item \textbf{Exact Baselines}: We implement a CP-SAT model in Google OR-Tools using \texttt{AllDifferent}, \texttt{Inverse}, and \texttt{AtMostOne}, and specify an ILP formulation for a subsequent comparison on common instances.
+    \item \textbf{Unified Pipeline and Independent Verification}: We provide a common CLI, DIMACS CNF exporter, partner-bound precheck, and a shared verifier for the three SGP constraints.
 \end{enumerate}
 
 The remainder of this paper is organized as follows. Section~\ref{sec:formulation} defines the SGP formally, states the partner bound, and presents the CP and ILP formulations. Section~\ref{sec:sat_approach} details the three-index SAT model, the four \textit{Exactly}-$s$ encodings, Order Encoding, symmetry breaking, and our verification pipeline. Section~\ref{sec:experiments} presents the experimental setup, empirical results, and analytical discussion. Section~\ref{sec:conclusion} concludes the paper and provides data and code availability.
@@ -214,10 +216,14 @@ In Constraint Programming \cite{gent2002cp,ortools}, we model the SGP using inte
 
 \noindent\textbf{Constraints:} Each group structurally holds exactly $s$ slot variables, satisfying (C2) by construction. Within every week $k \in K$, we enforce:
 \begin{align}
-    \text{slot}_{k,j,c} &< \text{slot}_{k,j,c+1} && \forall j \in J,\ c \in \{0, \ldots, s - 2\} \quad \text{(Intra-group symmetry breaking)}, \label{eq:cp_order} \\
-    \texttt{AllDifferent}\big(\{\text{slot}_{k,j,c} &: j \in J,\ c \in C\}\big) && \text{(Weekly bijection / C1)}, \label{eq:cp_alldiff} \\
-    \texttt{Inverse}\big(\text{slot}_{k,\cdot,\cdot},\ \text{pos}_{k,\cdot}\big) && \text{(Primal-dual position channeling)}, \label{eq:cp_inverse} \\
-    \text{group\_of}_{k,i} &= \lfloor \text{pos}_{k,i} / s \rfloor && \forall i \in P \quad (\text{implemented via }\texttt{AddDivisionEquality}), \label{eq:cp_div}
+    \text{slot}_{k,j,c} &< \text{slot}_{k,j,c+1}
+      && j \in J,\ 0\le c<s-1, \label{eq:cp_order} \\
+    &\texttt{AllDifferent}\big(\{\text{slot}_{k,j,c} : j \in J,\ c \in C\}\big)
+      && \text{(C1)}, \label{eq:cp_alldiff} \\
+    &\texttt{Inverse}\big(\text{slot}_{k,\cdot,\cdot},\ \text{pos}_{k,\cdot}\big)
+      && \text{(Position channeling)}, \label{eq:cp_inverse} \\
+    \text{group\_of}_{k,i} &= \lfloor \text{pos}_{k,i} / s \rfloor
+      && i \in P. \label{eq:cp_div}
 \end{align}
 where for the degenerate case $s = 1$, Equation~(\ref{eq:cp_div}) simplifies directly to $\text{group\_of}_{k,i} = \text{pos}_{k,i}$.
 
@@ -226,7 +232,7 @@ To enforce the Unique Pairings constraint (C3) when $w > 1$ and $s > 1$, we avoi
     m_{i_1,i_2,k} = 1 &\iff \big(\text{group\_of}_{k,i_1} = \text{group\_of}_{k,i_2}\big) && \forall k \in K, \label{eq:cp_reify} \\
     \sum_{k=0}^{w-1} m_{i_1,i_2,k} &\le 1 && \text{(\texttt{AddAtMostOne} across weeks)}. \label{eq:cp_social}
 \end{align}
-This yields $w n$ slot variables, $w n$ inverse variables, $w n$ group variables (for $s > 1$), and $w \binom{n}{2}$ Boolean meeting indicators. When optional static symmetry breaking is enabled via \texttt{--sb}, we additionally fix the first week (\texttt{sb1}: $\text{slot}_{0,j,c} = j \cdot s + c$) and the first $\min(g, s)$ players across subsequent weeks (\texttt{full}: $\text{group\_of}_{k,i} = i$ for $k \ge 1, 0 \le i < \min(g, s)$). Note that \texttt{AllDifferent} enables CP-SAT to perform strong Hall-interval domain filtering across each week, while SAT-clause learning inside OR-Tools CP-SAT handles conflict propagation over the reified $m_{i_1,i_2,k}$ variables.
+This yields $w n$ slot variables, $w n$ inverse variables, $w n$ group variables (for $s > 1$), and $w \binom{n}{2}$ Boolean meeting indicators when $w>1$ and $s>1$. When optional static symmetry breaking is enabled via \texttt{--sb}, we additionally fix the first week (\texttt{sb1}: $\text{slot}_{0,j,c} = j \cdot s + c$) and the first $\min(g, s)$ players across subsequent weeks (\texttt{full}: $\text{group\_of}_{k,i} = i$ for $k \ge 1, 0 \le i < \min(g, s)$). Note that \texttt{AllDifferent} enables CP-SAT to perform strong Hall-interval domain filtering across each week, while SAT-clause learning inside OR-Tools CP-SAT handles conflict propagation over the reified $m_{i_1,i_2,k}$ variables.
 
 \subsection{Integer Linear Programming (ILP) Formulation}
 \label{sec:ilp_formulation}
@@ -237,10 +243,13 @@ In Integer Linear Programming \cite{gurobi}, the SGP is formulated using binary 
     \text{find} \quad & x_{i,j,k} \in \{0, 1\},\ \ 0 \le y_{i_1,i_2,j,k} \le 1 \label{eq:ilp_vars} \\
     \text{s.t.} \quad & \sum_{j=0}^{g-1} x_{i,j,k} = 1 && \forall i \in P,\ k \in K \quad \text{(C1)}, \label{eq:ilp_c1} \\
                       & \sum_{i=0}^{n-1} x_{i,j,k} = s && \forall j \in J,\ k \in K \quad \text{(C2)}, \label{eq:ilp_c2} \\
-                      & y_{i_1,i_2,j,k} \ge x_{i_1,j,k} + x_{i_2,j,k} - 1,\quad y_{i_1,i_2,j,k} \le x_{i_1,j,k},\quad y_{i_1,i_2,j,k} \le x_{i_2,j,k} && \forall i_1 < i_2,\ j \in J,\ k \in K, \label{eq:ilp_lin} \\
+                      & y_{i_1,i_2,j,k} \ge x_{i_1,j,k} + x_{i_2,j,k} - 1
+                          && i_1<i_2,\ j \in J,\ k \in K, \label{eq:ilp_lin}\\
+                      & y_{i_1,i_2,j,k} \le x_{i_1,j,k},\quad y_{i_1,i_2,j,k} \le x_{i_2,j,k}
+                          && i_1<i_2,\ j \in J,\ k \in K, \notag\\
                       & \sum_{k=0}^{w-1} \sum_{j=0}^{g-1} y_{i_1,i_2,j,k} \le 1 && \forall i_1 < i_2 \quad \text{(C3)}. \label{eq:ilp_c3}
 \end{align}
-Note that the non-negativity bound $y_{i_1,i_2,j,k} \ge 0$ is mandatory so that negative $y$ values cannot artificially cancel positive meetings in Equation~(\ref{eq:ilp_c3}). [TV3: Add solver details for Gurobi / MIP].
+Note that the non-negativity bound $y_{i_1,i_2,j,k} \ge 0$ is mandatory so that negative $y$ values cannot artificially cancel positive meetings in Equation~(\ref{eq:ilp_c3}). The solver configuration and measurements will be reported with the ILP implementation.
 
 \section{SAT-Based Approaches}
 \label{sec:sat_approach}
@@ -248,76 +257,301 @@ Note that the non-negativity bound $y_{i_1,i_2,j,k} \ge 0$ is mandatory so that 
 \subsection{Three-Index One-Hot Representation}
 \label{sec:sat_model}
 
-% [TV2: Review and expand Section 3.1 based on src/sat_direct_encoders.py]
-Following the New SAT Encoding (NSE) basic structure \cite{kieu2025nse}, our primary SAT formulation uses $n \cdot g \cdot w$ Boolean variables $x_{i,j,k}$ denoting whether player $i \in \{0, \ldots, n - 1\}$ is assigned to group $j \in \{0, \ldots, g - 1\}$ in week $k \in \{0, \ldots, w - 1\}$. In DIMACS CNF numbering, each primary variable is mapped via the bijection:
+We use the player--group--week representation of the New SAT Encoding (NSE)~\cite{kieu2025nse}. The original four-index Direct Encoding (DE) also models positions within groups~\cite{gent2005sat}. In this study, \emph{direct} in the comparison with Order Encoding refers to the three-index assignment model.
+We use Boolean variables
 \begin{equation}
-    \text{ID}(i, j, k) = i \cdot g \cdot w + j \cdot w + k + 1.
-    \label{eq:dimacs_id}
+ x_{i,j,t}=1
+ \quad\Longleftrightarrow\quad
+ \text{player $i$ belongs to group $j$ in week $t$},
+ \label{eq:sgp-direct-variable}
 \end{equation}
-To isolate the effect of the Group Size encoding (C2), constraints (C1) and (C3) are held fixed across all four ablation configurations:
-\begin{itemize}[noitemsep]
-    \item \textbf{C1 (Unique Group Assignment)}: Exactly-One per player and week via an At-Least-One clause $\bigvee_{j=0}^{g-1} x_{i,j,k}$ and pairwise At-Most-One clauses $(\neg x_{i,j_1,k} \vee \neg x_{i,j_2,k})$ for all $0 \le j_1 < j_2 < g$.
-    \item \textbf{C2 (Group Size)}: $\sum_{i=0}^{n-1} x_{i,j,k} = s$ for every group $j$ and week $k$, encoded by one of the four cardinality methods in Section~\ref{sec:c2_encodings}.
-    \item \textbf{C3 (Unique Pairings)}: Direct four-literal negative clauses forbidding any pair $i_1 < i_2$ from sharing groups in two distinct weeks $k_1 < k_2$:
-    \begin{equation}
-        (\neg x_{i_1,j_1,k_1} \vee \neg x_{i_2,j_1,k_1} \vee \neg x_{i_1,j_2,k_2} \vee \neg x_{i_2,j_2,k_2}) \qquad \forall k_1 < k_2,\ \forall j_1, j_2 \in J,\ \forall i_1 < i_2.
-        \label{eq:sat_c3}
-    \end{equation}
-\end{itemize}
-[TV2: Expand details and exact C1/C3 clause counts here].
+where $1\leq i\leq n$, $1\leq j\leq g$, and $1\leq t\leq w$.
+Thus the model contains $V_{\mathrm{primary}}=ngw$ primary variables.
+This subsection uses one-based indices; the Python API uses
+zero-based player, group, and week indices. For Python indices $(i,j,t)$,
+the DIMACS identifier is $igw+jw+t+1$. This bijection reserves identifiers
+$1,\ldots,ngw$ for primary variables. Auxiliary variables are allocated
+above this range, with a monotonically increasing identifier shared by
+successive cardinality constraints.
+
+\paragraph{C1: one group per player and week.}
+Each player-week pair must select exactly one group. The implementation
+combines one at-least-one clause with the pairwise at-most-one clauses:
+\begin{align}
+ &\bigvee_{j=1}^{g} x_{i,j,t},
+ &&1\leq i\leq n,\quad 1\leq t\leq w,
+ \label{eq:sgp-c1-alo}\\
+ &\neg x_{i,j,t}\lor\neg x_{i,j',t},
+ &&1\leq j<j'\leq g.
+ \label{eq:sgp-c1-amo}
+\end{align}
+The pairwise choice is fixed in all four C2-ablation configurations. It
+introduces no auxiliary variables and emits exactly
+\begin{equation}
+ C_1=nw\left(1+\binom{g}{2}\right)
+ \label{eq:sgp-c1-size}
+\end{equation}
+clauses, including the unit at-least-one clauses when $g=1$.
+
+\paragraph{C2: fixed group size.}
+Every group contains exactly $s$ players:
+\begin{equation}
+ \sum_{i=1}^{n}x_{i,j,t}=s,
+ \qquad 1\leq j\leq g,\quad 1\leq t\leq w.
+ \label{eq:sgp-c2}
+\end{equation}
+Each C2 constraint is an equality with target $s$. Section~\ref{sec:c2_encodings} describes the four
+alternative CNF representations of~\eqref{eq:sgp-c2}.
+
+\paragraph{C3: no repeated pair.}
+For each player pair $i<i'$, distinct weeks $t<t'$, and groups $j,j'$, we
+add the clause
+\begin{equation}
+ \neg x_{i,j,t}\lor\neg x_{i',j,t}\lor
+ \neg x_{i,j',t'}\lor\neg x_{i',j',t'}.
+ \label{eq:sgp-c3}
+\end{equation}
+The groups $j$ and $j'$ may coincide. A clause is violated precisely
+when the two players share a group in both selected weeks. Consequently,
+these clauses forbid every repeated meeting and allow pairs that never
+meet. They introduce no auxiliary variables and their exact count is
+\begin{equation}
+ C_3=\binom{w}{2}g^2\binom{n}{2}.
+ \label{eq:sgp-c3-size}
+\end{equation}
+The pairwise form is simple but grows quadratically in both the number
+of players and the number of weeks. Its cost must therefore be included
+when interpreting total CNF size.
+
+\paragraph{Correctness and decoding.}
+For an assignment satisfying C1, each player has one group in each week.
+C2 gives all groups the required size, and C3 prevents repeated player
+pairs. Reading the true primary variables therefore produces a valid
+SGP schedule. Conversely, a valid schedule satisfies C1--C3, and each
+correct cardinality encoding admits an auxiliary extension of its C2
+assignments. Hence the conjunction is satisfiable exactly when a valid
+schedule exists. Decoding ignores auxiliary variables. The runner checks that the Boolean model satisfies the CNF, then verifies
+weekly coverage, group sizes and pair uniqueness in the decoded schedule.
+This semantic argument is distinct from the finite regression tests:
+exhaustive checks on small domains can reveal implementation errors but
+do not by themselves prove correctness for every parameter value.
 
 \subsection{Exactly-$s$ Cardinality Encodings for Group Size}
 \label{sec:c2_encodings}
 
-% [TV2: Review and expand Section 3.2 with exact NSC Equations (2)-(9) and PySAT CardEnc encodings]
-We compare four \textit{Exactly}-$s$ cardinality encodings for C2 (with $K = s$ over $n = g \cdot s$ literals per group-week slice):
-\begin{enumerate}[label=(\arabic*),noitemsep]
-    \item \textbf{New Sequential Counter (\texttt{nsc})} \cite{kieu2025nse}: Custom implementation of Equations~(2)--(9) from Kieu et al., introducing auxiliary partial-sum variables $R^{j,k}_{i,r}$ with bidirectional implication chains that preserve complete Generalized Arc Consistency (GAC) for $K \le s$ while reducing auxiliary variables and clauses compared to Sinz's Sequential Counter.
-    \item \textbf{Sequential Counter (\texttt{seqcounter})} \cite{sinz2005towards}: Standard sequential counter via PySAT \texttt{CardEnc.equals(..., EncType.seqcounter)} \cite{imms2018pysat}.
-    \item \textbf{Totalizer (\texttt{totalizer})} \cite{bailleux2003totalizer}: Binary-tree unary-adder cardinality network via PySAT \texttt{CardEnc.equals(..., EncType.totalizer)}.
-    \item \textbf{Cardinality Network (\texttt{cardnetwrk})} \cite{asin2009cardnet}: Sorting/merging-network cardinality encoding via PySAT \texttt{CardEnc.equals(..., EncType.cardnetwrk)}.
-\end{enumerate}
+For one fixed group and week, let $a_i=x_{i,j,t}$ and let $k=s$.
+We compare four implementations of $\sum_{i=1}^{n}a_i=k$: New
+Sequential Counter (\texttt{nsc}), Sequential Counter
+(\texttt{seqcounter}), Totalizer (\texttt{totalizer}), and Cardinality
+Network (\texttt{cardnetwrk}). These are four configurations of the same
+compact three-index model. We hold C1 and C3 fixed and vary only the CNF for C2.
 
-Table~\ref{tab:c2_complexity} summarizes the theoretical footprint per \textit{Exactly}-$s$ constraint over $n$ literals. [TV2: Expand equations and empirical variable/clause table for the four configurations].
+\paragraph{New Sequential Counter.}
+The NSC implementation follows the counter clauses in the course-provided
+SGP manuscript~\cite{kieu-course-nse}. For $1\leq k<n$, it introduces
+\begin{equation}
+ R_{i,h}\ \Longleftrightarrow\
+ \sum_{u=1}^{i}a_u\geq h,
+ \qquad
+ 1\leq i\leq n-1,\quad 1\leq h\leq\min(i,k).
+ \label{eq:nsc-meaning}
+\end{equation}
+The group and week indices on $R$ are omitted here; each group-week pair
+has its own auxiliary variables. The initialization clauses are
+\begin{align}
+ &\neg a_i\lor R_{i,1}, &&1\leq i\leq n-1,
+ \label{eq:nsc-init-one}\\
+ &a_i\lor\neg R_{i,i}, &&1\leq i\leq k.
+ \label{eq:nsc-init-diagonal}
+\end{align}
+For $2\leq i\leq n-1$, the update clauses are
+\begin{align}
+ &\neg R_{i-1,h}\lor R_{i,h},
+ &&1\leq h\leq\min(i-1,k),
+ \label{eq:nsc-forward}\\
+ &\neg a_i\lor\neg R_{i-1,h-1}\lor R_{i,h},
+ &&2\leq h\leq\min(i,k),
+ \label{eq:nsc-increment}\\
+ &a_i\lor R_{i-1,h}\lor\neg R_{i,h},
+ &&1\leq h\leq\min(i-1,k),
+ \label{eq:nsc-false-input}\\
+ &R_{i-1,h-1}\lor\neg R_{i,h},
+ &&2\leq h\leq\min(i,k).
+ \label{eq:nsc-reverse}
+\end{align}
+Together these clauses implement the threshold recurrence
+$R_{i,h}=R_{i-1,h}\lor(a_i\land R_{i-1,h-1})$, with the unavailable
+boundary thresholds interpreted as constants. The initialization handles
+those boundaries without allocating constant variables. Finally, the
+at-least-$k$ condition is represented by
+\begin{equation}
+ (R_{n-1,k}\lor a_n)\land
+ (R_{n-1,k}\lor R_{n-1,k-1}),
+ \label{eq:nsc-lower-bound}
+\end{equation}
+where the second clause is omitted for $k=1$. The at-most-$k$ condition
+uses
+\begin{equation}
+ \neg a_i\lor\neg R_{i-1,k},\qquad k+1\leq i\leq n.
+ \label{eq:nsc-upper-bound}
+\end{equation}
+By the threshold meaning of $R$, \eqref{eq:nsc-lower-bound} states that
+at least $k$ inputs are true. If more than $k$ inputs were true, the
+$(k+1)$-st true input would violate~\eqref{eq:nsc-upper-bound}. Conversely,
+any assignment with exactly $k$ true inputs extends to the actual prefix
+thresholds and satisfies all these clauses. This establishes the required
+equisatisfiability with Exactly-$k$. The cases $k=0$ and $k=n$ are emitted
+as $n$ negative or positive unit clauses, respectively, without counters.
+
+The number of counter variables for a nondegenerate constraint is
+\begin{equation}
+ A(n,k)=\sum_{i=1}^{n-1}\min(i,k)
+       =\frac{k(2n-k-1)}{2}.
+ \label{eq:nsc-aux-count}
+\end{equation}
+Counting every clause appended by the implementation, including clauses
+that could be removed by subsequent simplification, gives
+\begin{equation}
+ C_{\mathrm{NSC}}(n,k)
+ =4A(n,k)-2k+2+\begin{cases}0,&k=1,\\1,&k\geq2.\end{cases}
+ \label{eq:nsc-clause-count}
+\end{equation}
+For example, the four update families contribute
+$2[A(n,k)-k]+2[A(n,k)-n+1]$ clauses. Adding the initialization and final
+conditions yields~\eqref{eq:nsc-clause-count}. These are counts of this
+implementation, rather than a claim that all formulations called NSC have
+the same size.
+
+\paragraph{Distinguishing source summary and emitted counts.}
+Table~1 of the supplied manuscript lists the NSC clause expression
+$2nk+n-3k-k^2$, whereas explicit generation of its Eq.~(2)--(9), with
+the stated index ranges and CNF expansion of Eq.~(8), gives
+\eqref{eq:nsc-clause-count} in this implementation. These expressions
+are not identical: for $n=4$, $k=2$, both approaches to the auxiliary
+count give five variables, but the summary expression gives ten
+clauses and the explicit clause families emit nineteen. We report the
+emitted counts for all four encodings under the same counting convention.
+
+\paragraph{Sequential Counter.}
+The sequential-counter family encodes a bound through prefix counters
+following Sinz~\cite{sinz2005towards}. We use PySAT's \texttt{seqcounter}
+implementation. The library source documents an irredundant variant,
+so the original rectangular-counter formula $k(n-1)$ is not substituted
+for the number actually generated~\cite{pysat-seqcounter-source}.
+
+\paragraph{Totalizer.}
+The Totalizer recursively combines unary representations of counts in a
+binary tree~\cite{bailleux2003totalizer}. A merge relates thresholds in the two
+children to thresholds in their parent. The project calls
+\texttt{CardEnc.equals} with \texttt{EncType.totalizer}; it does not
+share a counter tree between the lower and upper bounds.
+
+\paragraph{Cardinality Network.}
+Cardinality networks use comparator-based selection and merge structures
+to expose the output threshold needed by a cardinality
+bound~\cite{asin2009cardnet}. We select PySAT's \texttt{cardnetwrk} implementation.
+Its generated size includes padding variables and clauses required by
+the concrete network construction. Smaller CNF size alone does not imply
+shorter SAT solving time.
+
+\paragraph{Both sides of equality.}
+For a library encoder $e$, \texttt{CardEnc.equals}
+constructs both bounds~\cite{pysat-card-docs}:
+\begin{equation}
+ \sum_i a_i\leq k
+ \quad\land\quad
+ \sum_i \neg a_i\leq n-k.
+ \label{eq:equals-two-bounds}
+\end{equation}
+Let $a_e(n,q)$ and $c_e(n,q)$ denote the actual auxiliary-variable and
+clause counts of the selected library encoder for one AtMost-$q$
+constraint. With disjoint auxiliary identifiers, one Exactly-$k$
+constraint therefore contributes
+\begin{align}
+ A_e(n,k)&=a_e(n,k)+a_e(n,n-k),
+ \label{eq:equals-aux-count}\\
+ C_e(n,k)&=c_e(n,k)+c_e(n,n-k).
+ \label{eq:equals-clause-count}
+\end{align}
+The common shortcuts are $a_e(n,0)=a_e(n,n-1)=a_e(n,n)=0$ and
+$c_e(n,0)=n$, $c_e(n,n-1)=1$, $c_e(n,n)=0$, for $n\geq2$.
+For $n=1$, the $q=0$ and $q=n$ cases suffice. The project's explicit
+Exactly-$0$ and Exactly-$n$ shortcuts both use $n$ unit clauses.
 
 \begin{table}[pos=!htb]
-\centering\footnotesize
-\renewcommand{\arraystretch}{0.85}
-\caption{Theoretical complexity per \textit{Exactly}-$s$ constraint over $n$ Boolean variables (per group-week slice).}
-\label{tab:c2_complexity}
-\begin{tabular}{llll}
-\toprule
-\textbf{C2 Encoding} & \textbf{Auxiliary Variables} & \textbf{Clause Complexity} & \textbf{Reference} \\
-\midrule
-New Sequential Counter (\texttt{nsc})        & $s(n - 1) - \frac{s(s - 1)}{2}$ & $O(s n)$ ($2sn + n - 3s - s^2$ core) & Kieu et al. \cite{kieu2025nse} \\
-Sequential Counter (\texttt{seqcounter})     & $O(s n)$                         & $O(s n)$                              & Sinz (2005) \cite{sinz2005towards} \\
-Totalizer (\texttt{totalizer})               & $O(n \log n)$                    & $O(n^2)$                              & Bailleux \& Boufkhad (2003) \cite{bailleux2003totalizer} \\
-Cardinality Network (\texttt{cardnetwrk})    & $O(n \log^2 s)$                  & $O(n \log^2 s)$                       & As{\'\i}n et al. (2009) \cite{asin2009cardnet} \\
-\bottomrule
-\end{tabular}
+ \centering
+ \caption{Cost per group-week C2 constraint. All rows encode equality;
+ bounds are for emitted CNF before solver preprocessing. NSC formulas
+ assume $1\leq k<n$. For the library rows, exact counts use
+ \eqref{eq:equals-aux-count}--\eqref{eq:equals-clause-count}.}
+ \label{tab:cardinality-complexity}
+ \small
+ \begin{tabular}{@{}lll@{}}
+  \toprule
+  Encoding & Auxiliary variables & Clauses \\
+  \midrule
+  NSC & $A(n,k)=k(2n-k-1)/2$ & $4A(n,k)-2k+2+\mathbf{1}_{k\geq2}$ \\
+  Sequential Counter & $A_{\mathrm{SC}}(n,k)$ & $C_{\mathrm{SC}}(n,k)$ \\
+  Totalizer & $O(n\log n)$ & $O(n^2)$ \\
+  Cardinality Network & $O(n\log^2 n)$ & $O(n\log^2 n)$ \\
+  \bottomrule
+ \end{tabular}
 \end{table}
+
+For PySAT's irredundant sequential-counter implementation, the exact
+nontrivial single-bound counts, for $1\leq q\leq n-2$, are
+\begin{equation}
+ a_{\mathrm{SC}}(n,q)=q(n-q),\qquad
+ c_{\mathrm{SC}}(n,q)=(n-q)(2q+1)-q.
+ \label{eq:sc-implementation-count}
+\end{equation}
+They follow by counting the allocated counter cells and generated clauses
+in its nested loops~\cite{pysat-seqcounter-source}. The full unary
+Totalizer and the comparator-network recurrences justify the conservative
+worst-case bounds in Table~\ref{tab:cardinality-complexity}; the bounds
+allow both sides of~\eqref{eq:equals-two-bounds} and implementation
+padding~\cite{pysat-totalizer-source,pysat-network-source}. Bound-specific
+shortcuts can make small instances substantially smaller. Accordingly,
+the accompanying size-generation script records the library version and
+actual counts rather than using asymptotic estimates as measurements.
+
+For every fully constructed three-index SGP formula without extra
+symmetry clauses,
+the total counts are
+\begin{align}
+ V_{\mathrm{SGP},e}&=ngw+gwA_e(n,s),
+ \label{eq:sgp-total-vars}\\
+ C_{\mathrm{SGP},e}&=nw\left(1+\binom{g}{2}\right)
+      +gwC_e(n,s)+\binom{w}{2}g^2\binom{n}{2}.
+ \label{eq:sgp-total-clauses}
+\end{align}
+In these equations $A_e(n,s)$ and $C_e(n,s)$ are the per-C2 counts; for
+NSC with $s<n$ they are supplied by~\eqref{eq:nsc-aux-count} and
+\eqref{eq:nsc-clause-count}. When $s=n$, $A_e(n,s)=0$ and $C_e(n,s)=n$.
+The optional \texttt{symmetry\_clauses} argument to this encoder accepts
+only primary literals. The added clauses are counted separately.
 
 \subsection{Order Encoding}
 \label{sec:order_encoding}
 
 % [TV3: Complete Section 3.3 once src/order_encoder.py is finalized]
-As an alternative representation, Order Encoding \cite{tamura2009order} models each slot's assigned golfer as an integer variable $P_{w,g,c} \in \{1, \ldots, n\}$ encoded via monotone Boolean order variables $B_{w,g,c,v} \iff (P_{w,g,c} \le v)$ for $v \in \{1, \ldots, n - 1\}$, linked by the axiom clauses $(\neg B_{w,g,c,v} \vee B_{w,g,c,v+1})$. [TV3: Add strict intra-group ordering clauses $(\neg B_{Y \le v} \vee B_{X \le v - 1})$, weekly AllDifferent encoding, and unique-pairing constraints].
+As an alternative representation, Order Encoding \cite{tamura2009order} models each slot's assigned golfer as an integer variable $P_{w,g,c} \in \{1, \ldots, n\}$ encoded via monotone Boolean order variables $B_{w,g,c,v} \iff (P_{w,g,c} \le v)$ for $v \in \{1, \ldots, n - 1\}$, linked by the axiom clauses $(\neg B_{w,g,c,v} \vee B_{w,g,c,v+1})$. The implementation must specify its weekly assignment, group ordering, and pair uniqueness encodings before comparison.
 
 \subsection{Symmetry Breaking Constraints}
 \label{sec:symmetry_breaking}
 
 % [TV3: Complete Section 3.4 once src/symmetry.py is finalized]
-Static symmetry breaking reduces redundant isomorphic search spaces via unit clauses over primary variables \cite{kieu2025nse}: \textbf{SB1} fixes week~1 in canonical lexicographical order, and \textbf{SB2} fixes the first $\min(g, s)$ players to distinct groups $0, \ldots, \min(g,s)-1$ for weeks $k \ge 1$. [TV3: Add exact unit-clause equations and any verified extensions].
+Static symmetry breaking reduces redundant isomorphic search spaces via unit clauses over primary variables \cite{kieu2025nse}: \textbf{SB1} fixes week~1 in canonical lexicographical order, and \textbf{SB2} fixes the first $\min(g, s)$ players to distinct groups $0, \ldots, \min(g,s)-1$ for weeks $k \ge 1$. The SAT screen uses \texttt{SB=none}. The follow-up experiment will record the clauses actually used.
 
 \subsection{Unified Solving Pipeline, DIMACS Export, and Universal Verification}
 \label{sec:pipeline}
 
-To guarantee experimental consistency across SAT, Order Encoding, CP-SAT, and ILP, all methods execute through a unified pipeline implemented in \texttt{main.py}, \texttt{src/io\_utils.py}, \texttt{src/verifier.py}, and \texttt{src/display.py}:
+The common CLI currently runs the three-index SAT and CP-SAT methods. The Order and ILP interfaces are intended to use the same schedule format and verifier.
 \begin{enumerate}[label=(\arabic*),noitemsep]
-    \item \textbf{Partner-Bound Precheck}: Before building any CNF formula or CP/ILP model, \texttt{check\_partner\_bound} evaluates Equation~(\ref{eq:partner_bound}) for $s > 1$. Instances with $w > w_{\max}$ are immediately certified \texttt{UNSAT} without invoking a solver backend.
-    \item \textbf{Encoding / Model Construction \& DIMACS Export}: Depending on \texttt{--method}, the pipeline generates the CNF formula (with optional DIMACS \texttt{.cnf} export via \texttt{export\_dimacs}) or constructs the CP/ILP model, recording construction time separately from solving time.
-    \item \textbf{Isolated Solving \& Timing}: SAT calls run in isolated subprocesses with wall-time cutoffs via \texttt{src/sat\_runner.py}; CP-SAT executes in \texttt{src/cp\_solver.py} recording build time, solver wall time, and OS process CPU time separately.
-    \item \textbf{Universal Solution Verification}: Every \texttt{SAT} outcome is decoded to the canonical 0-based dictionary \texttt{schedule[week][group]} and passed through our standalone \texttt{verify\_schedule} checker in \texttt{src/verifier.py}. The verifier independently checks all three SGP invariants---weekly bijection (C1), group cardinality $s$ (C2), and unique pairings across all weeks (C3)---in $O(w g s^2)$ time before marking \texttt{verified = True}.
+    \item \textbf{Partner-Bound Precheck}: The SAT and CP-SAT implementations check Equation~\eqref{eq:partner_bound} for $s > 1$. Instances with $w > w_{\max}$ return \texttt{UNSAT} without invoking a solver backend.
+    \item \textbf{Encoding / Model Construction \& DIMACS Export}: The SAT branch builds CNF and optionally exports DIMACS. The CP-SAT branch builds an integer model. Construction and solving times are recorded separately.
+    \item \textbf{Isolated Solving \& Timing}: SAT calls run in isolated subprocesses with wall-time cutoffs via \path{src/sat_runner.py}. CP-SAT records build time, solver wall time, and process CPU time separately.
+    \item \textbf{Universal Solution Verification}: Every \texttt{SAT} outcome from this CLI is decoded to the canonical 0-based dictionary \texttt{schedule[week]}\allowbreak\texttt{[group]} and passed through our standalone \texttt{verify\_schedule} checker in \texttt{src/verifier.py}. The verifier independently checks all three SGP invariants---weekly bijection (C1), group cardinality $s$ (C2), and unique pairings across all weeks (C3)---in $O(w g s^2)$ time for a well-formed schedule before marking \texttt{verified = True}.
 \end{enumerate}
 
 \section{Computational Experiments}
@@ -326,173 +560,158 @@ To guarantee experimental consistency across SAT, Order Encoding, CP-SAT, and IL
 \subsection{Benchmark Suite and Experimental Setup}
 \label{sec:exp_setup}
 
-To evaluate both scalability and robustness, we adopt the benchmark suite of 66 SGP instances compiled by Kieu et al.~\cite{kieu2025nse} (spanning four classical literature sources: Gent \& Lynce~\cite{gent2005sat}, Triska \& Musliu~\cite{triska2012tme}, Lardeux \& Monfroy~\cite{lardeux2015sce}, and Liu et al.~\cite{liu2019sgp}) together with boundary test cases ($s = 1$, partner-bound UNSAT cases, and small UNSAT cases such as \texttt{2-3-2}). Table~\ref{tab:benchmarks_summary} summarizes the benchmark tiers.
-
-\begin{table}[pos=!htb]
-\centering\footnotesize
-\renewcommand{\arraystretch}{0.85}
-\caption{Summary of SGP benchmark instance categories evaluated in this study.}
-\label{tab:benchmarks_summary}
-\begin{tabular}{llll}
-\toprule
-\textbf{Category / Tier} & \textbf{Representative Instances ($g\text{-}p\text{-}w$)} & \textbf{Player Count ($n = gs$)} & \textbf{Primary Purpose} \\
-\midrule
-Small \& Oracle Cases    & \texttt{2-2-2}, \texttt{2-2-3}, \texttt{3-3-3}, \texttt{3-3-4}, \texttt{4-4-5} & $4 - 16$   & Cross-paradigm correctness \& baseline timing \\
-Boundary \& UNSAT Cases  & \texttt{2-3-2}, \texttt{3-6-6}, \texttt{5-8-3}, \texttt{8-10-3}         & $6 - 80$   & Partner-bound precheck \& UNSAT proof efficiency \\
-Hard Combinatorial Cases & \texttt{6-3-8}, \texttt{6-5-5}, \texttt{8-4-8}, \texttt{8-8-9}, \texttt{9-9-10} & $18 - 81$ & Scalability stress test across encodings \& solvers \\
-Large $n$ / Low $w$ Cases & \texttt{11-11-12}, \texttt{15-8-2}, \texttt{17-9-2}, \texttt{19-10-2} & $120 - 190$ & Memory footprint and CNF size scalability \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\noindent\textbf{Hardware and Software Environment:} Experiments were conducted on [TBD: CPU model, core count, RAM GB, OS]. The software stack uses Python~3.12 (64-bit), PySAT~1.9.dev21 \cite{imms2018pysat} providing CaDiCaL~1.5.3 \cite{biere2024cadical} and Glucose~4.1 \cite{audemard2018glucose}, Google OR-Tools~9.15 (CP-SAT) \cite{ortools}, Gurobi Optimizer [TBD: version] \cite{gurobi}, and \texttt{cnsplots}~0.8.0 for publication-quality plots.
-
-\noindent\textbf{Experimental Protocol:} Each solver configuration was run with a strict wall-time limit of $T = \text{[TBD]}$ seconds per instance. Every reported \texttt{SAT} solution was verified via \texttt{src/verifier.py} (\texttt{verified = True}), and build/encode time, solver wall time, and process CPU time were logged separately in \texttt{benchmarks/results.csv}.
+The source list contains 66 triples in the $g$-$p$-$w$ convention and
+records the status reported by the course manuscript~\cite{kieu-course-nse}.
+We use $s=p$ and pass the triples to the encoder as $(w,g,s)$.
+Source statuses serve as cross-checks for decided runs. An unknown
+reference status, timeout, or unattempted run provides no decision.
 
 \subsection{Experiment 1: Ablation of C2 Exactly-$s$ Encodings}
 \label{sec:exp1_c2}
 
-Experiment~1 isolates the impact of the four Group Size (C2) cardinality encodings (\texttt{nsc}, \texttt{seqcounter}, \texttt{totalizer}, and \texttt{cardnetwrk}) while keeping C1, C3, and the symmetry-breaking mode fixed. Table~\ref{tab:exp1_c2} aggregates the solved instance counts, CNF footprints, and runtimes, while Figure~\ref{fig:runtime_c2_encodings} visualizes mean solve time as the number of golfers $n = g \times s$ grows.
+Before screening, we compared the four encodings with an independent
+partition enumerator on 29 small instances. The enumeration checks
+feasibility without building a CNF. Tests with Glucose agreed with its
+answers in all 232 combinations of instance, encoding, and first-week
+fixing. We also ran the common CLI with both backends on a feasible
+instance and an infeasible instance that passes the partner bound.
+All four encodings gave the expected decision in both cases.
+
+We first measured the full CNF generated by each encoder on four cases
+with no added symmetry clauses. Table~\ref{tab:tv2_sizes} reports auxiliary
+variables and all clauses before solver preprocessing. NSC uses the fewest
+auxiliary variables in all four cases. Sequential Counter emits the
+fewest clauses in these cases because C1 and C3 are identical across
+encoders and its C2 contribution is smaller. The two size measures can
+therefore favor different encodings.
 
 \begin{table}[pos=!htb]
-\centering\footnotesize
-\renewcommand{\arraystretch}{0.82}
-\caption{Aggregate performance of the four C2 \textit{Exactly}-$s$ encodings under fixed C1/C3 (TO: Timeout).}
-\label{tab:exp1_c2}
-\begin{tabular}{llrrrrrr}
+\centering\small
+\caption{Measured formula sizes before solver preprocessing. Each cell reports auxiliary variables / total clauses.}
+\label{tab:tv2_sizes}
+\begin{tabular}{lrrrr}
 \toprule
-\textbf{Solver} & \textbf{C2 Encoding} & \textbf{SAT} & \textbf{UNSAT} & \textbf{TO} & \textbf{Total Vars} & \textbf{Total Clauses} & \textbf{Mean Time (s)} \\
+C2 encoding & \texttt{2-2-2} & \texttt{3-3-3} & \texttt{4-4-4} & \texttt{5-3-5} \\
 \midrule
-CaDiCaL 1.5.3 & \texttt{nsc}        & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-CaDiCaL 1.5.3 & \texttt{seqcounter} & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-CaDiCaL 1.5.3 & \texttt{totalizer}  & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-CaDiCaL 1.5.3 & \texttt{cardnetwrk} & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-\midrule
-Glucose 4.1   & \texttt{nsc}        & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-Glucose 4.1   & \texttt{seqcounter} & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-Glucose 4.1   & \texttt{totalizer}  & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-Glucose 4.1   & \texttt{cardnetwrk} & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
+NSC & 20 / 116 & 189 / 1809 & 864 / 15344 & 975 / 30900 \\
+SeqCounter & 32 / 104 & 324 / 1728 & 1536 / 15040 & 1800 / 30675 \\
+Totalizer & 64 / 160 & 522 / 2268 & 2048 / 17888 & 2950 / 35325 \\
+Cardinality Network & 80 / 168 & 1620 / 3519 & 3872 / 17808 & 5400 / 35200 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{figure}[pos=!htb]
     \centering
-    \includesafeimage[width=0.78\textwidth]{runtime_c2_encodings.pdf}
-    \caption{Runtime scaling of the four C2 \textit{Exactly}-$s$ encodings (\texttt{nsc}, \texttt{seqcounter}, \texttt{totalizer}, \texttt{cardnetwrk}) as the number of golfers $n = g \times s$ increases, generated with \texttt{cnsplots}.}
-    \label{fig:runtime_c2_encodings}
+    \includesafeimage[width=0.74\textwidth]{tv2_c2_footprint.pdf}
+    \caption{C2 clauses per group-week equality in the four size examples,
+    plotted with CNSPlots~0.8.0. Instance labels are $g$-$p$-$w$.}
+    \label{fig:tv2_footprint}
 \end{figure}
 
-[TBD: Analyze Table~\ref{tab:exp1_c2} and Figure~\ref{fig:runtime_c2_encodings} after running \texttt{benchmarks/run\_all.py}: compare auxiliary variable counts, clause counts, propagation strength of NSC vs.\ PySAT's SeqCounter/Totalizer/CardNetwrk, and consistency between CaDiCaL~1.5.3 and Glucose~4.1].
+\paragraph{SAT screening protocol.}
+We considered each of the 66 source instances with four encodings and
+two backends (CaDiCaL~1.5.3~\cite{cadical153} and Glucose~4.1~\cite{audemard2018glucose}) through PySAT~1.9.dev21.
+The screen ran each configuration once in sequence, using the fixed
+generation order C1, C2, C3 and no added symmetry clauses.
+We set a 2-second wall budget on the worker and its solver process.
+This includes worker startup, CNF construction and serialization,
+solving, and verification. The caller's bookkeeping and timeout
+cleanup are outside this budget. To bound resource use, configurations
+with a C1+C3 lower estimate above 250{,}000 clauses were skipped.
+Instances ruled out by the partner bound use the precheck shortcut
+without constructing C1--C3. We record precheck UNSAT separately
+from solver UNSAT.
 
-\subsection{Experiment 2: Cross-Paradigm Comparison (SAT vs.\ CP-SAT vs.\ ILP)}
+\paragraph{Environment and results.}
+The screen used Windows~10 (build 19045), Python~3.12.14,
+and an Intel Core i5-8400H processor (eight logical processors, 15.8~GiB
+RAM). The solver wrapper used its backend defaults. Table~\ref{tab:exp1_c2}
+reports all 528 configurations. The resource policy skipped
+264 configurations across 33 instances. Among the
+264 remaining configurations, 102 returned SAT with both model
+and schedule verified, 56 returned precheck UNSAT, and 106
+timed out. No backend returned UNSAT in this screen.
+The SAT decisions cover 15 distinct instances, with up to
+45 players. All 158 decided configurations agree
+with the known source status for their instance.
+
+\begin{table}[pos=!htb]
+\centering\small
+\caption{SAT screening on the 66 source instances. Precheck denotes partner-bound UNSAT. The UNSAT column counts only decisions by a backend.}
+\label{tab:exp1_c2}
+\begin{tabular}{llrrrrr}
+\toprule
+Backend & C2 encoding & SAT & UNSAT & Precheck & Timeout & Skipped \\
+\midrule
+CaDiCaL & NSC & 13 & 0 & 7 & 13 & 33 \\
+CaDiCaL & SeqCounter & 13 & 0 & 7 & 13 & 33 \\
+CaDiCaL & Totalizer & 11 & 0 & 7 & 15 & 33 \\
+CaDiCaL & Cardinality Network & 10 & 0 & 7 & 16 & 33 \\
+\midrule
+Glucose & NSC & 15 & 0 & 7 & 11 & 33 \\
+Glucose & SeqCounter & 14 & 0 & 7 & 12 & 33 \\
+Glucose & Totalizer & 13 & 0 & 7 & 13 & 33 \\
+Glucose & Cardinality Network & 13 & 0 & 7 & 13 & 33 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Interpretation.}
+This screen measures coverage under the declared budget and resource
+policy. The instances reaching each solver and the short cutoff limit
+what can be inferred about relative performance. CNF size alone cannot
+predict search cost. The source study uses different encodings and
+symmetry settings, a different timing metric, and a much longer budget.
+We do not use its times as a baseline for speedups.
+
+\subsection{Experiment 2: Cross-Paradigm Comparison}
 \label{sec:exp2_paradigms}
 
-Experiment~2 evaluates the exact solver paradigms head-to-head across the benchmark suite: our SAT formulation (CaDiCaL~1.5.3 with NSC), Constraint Programming (OR-Tools CP-SAT), and Integer Linear Programming (Gurobi). Figure~\ref{fig:cactus_sat_cp_ilp} displays the cactus plot of solved instances against solving time, and Table~\ref{tab:exp2_paradigms} reports detailed runtimes on representative instances.
+The comparison of SAT with CP and ILP is pending. The intended design
+uses the same case list, machine, thread policy, and whole-run wall
+budget across methods. It records build time and solver time separately
+and verifies feasible schedules with the shared verifier. Cases excluded
+by the partner bound should be reported consistently before constructing
+a solver-only cactus plot. The planned comparison includes OR-Tools
+CP-SAT and Gurobi. The assignment also lists CPLEX CP and CPLEX MIP,
+whose availability and scope still need to be confirmed.
 
-\begin{figure}[pos=!htb]
-    \centering
-    \includesafeimage[width=0.78\textwidth]{cactus_sat_cp_ilp.pdf}
-    \caption{Cactus plot comparing the number of solved SGP instances against solve time (log scale) across SAT (CaDiCaL), CP (OR-Tools CP-SAT), and ILP (Gurobi), generated with \texttt{cnsplots}.}
-    \label{fig:cactus_sat_cp_ilp}
-\end{figure}
+\subsection{Experiment 3: Order Encoding and Symmetry Breaking}
+\label{sec:exp3_order_sb}
 
-\begin{table}[pos=!htb]
-\centering\footnotesize
-\renewcommand{\arraystretch}{0.80}
-\setlength{\tabcolsep}{4.5pt}
-\caption{Head-to-head runtime comparison on representative SGP instances (seconds; TO: Timeout).}
-\label{tab:exp2_paradigms}
-\begin{tabular}{lcrrrrr}
-\toprule
-\textbf{Instance ($g\text{-}p\text{-}w$)} & \textbf{Expected} & \textbf{SAT-NSC (CaDiCaL)} & \textbf{SAT-NSC (Glucose)} & \textbf{Order SAT} & \textbf{CP-SAT} & \textbf{ILP (Gurobi)} \\
-\midrule
-\texttt{2-2-3}  & SAT   & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-\texttt{3-3-4}  & SAT   & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-\texttt{4-4-5}  & SAT   & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-\texttt{5-4-4}  & SAT   & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-\texttt{6-3-8}  & SAT   & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-\texttt{8-4-8}  & SAT   & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-\texttt{8-8-9}  & SAT   & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-\texttt{3-6-6}  & UNSAT & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-\texttt{5-8-3}  & UNSAT & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-\texttt{6-6-7}  & UNSAT & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-[TBD: Discuss Figure~\ref{fig:cactus_sat_cp_ilp} and Table~\ref{tab:exp2_paradigms}: analyze where CP-SAT's global \texttt{AllDifferent} excels, how ILP's $O(w g n^2)$ linearization variables $y_{i_1,i_2,j,k}$ scale, and how SAT behaves on hard SAT and UNSAT instances].
-
-\subsection{Experiment 3: Direct Encoding vs.\ Order Encoding and Symmetry Breaking Impact}
-\label{sec:exp3_direct_order}
-
-Experiment~3 compares the one-hot Direct/NSE model against Order Encoding on common benchmark instances (Figure~\ref{fig:bar_direct_vs_order}) and measures the speedup provided by static symmetry breaking (\texttt{none} vs.\ \texttt{sb1} vs.\ \texttt{full}) summarized in Table~\ref{tab:exp3_direct_order}.
-
-\begin{figure}[pos=!htb]
-    \centering
-    \includesafeimage[width=0.78\textwidth]{bar_direct_vs_order.pdf}
-    \caption{Per-instance runtime comparison between Direct SAT Encoding and Order Encoding on shared SGP benchmarks (log scale), generated with \texttt{cnsplots}.}
-    \label{fig:bar_direct_vs_order}
-\end{figure}
-
-\begin{table}[pos=!htb]
-\centering\footnotesize
-\renewcommand{\arraystretch}{0.82}
-\caption{Impact of Order Encoding and symmetry breaking modes (\texttt{none}, \texttt{sb1}, \texttt{full}).}
-\label{tab:exp3_direct_order}
-\begin{tabular}{llrrrr}
-\toprule
-\textbf{Method} & \textbf{SB Mode} & \textbf{Solved (SAT / UNSAT)} & \textbf{Timeouts} & \textbf{Mean Time (s)} & \textbf{Median Time (s)} \\
-\midrule
-SAT Direct (\texttt{nsc}) & \texttt{none} & [TBD] & [TBD] & [TBD] & [TBD] \\
-SAT Direct (\texttt{nsc}) & \texttt{sb1}  & [TBD] & [TBD] & [TBD] & [TBD] \\
-SAT Direct (\texttt{nsc}) & \texttt{full} & [TBD] & [TBD] & [TBD] & [TBD] \\
-Order Encoding            & \texttt{none} & [TBD] & [TBD] & [TBD] & [TBD] \\
-Order Encoding            & \texttt{full} & [TBD] & [TBD] & [TBD] & [TBD] \\
-CP-SAT (OR-Tools)         & \texttt{none} & [TBD] & [TBD] & [TBD] & [TBD] \\
-CP-SAT (OR-Tools)         & \texttt{full} & [TBD] & [TBD] & [TBD] & [TBD] \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-[TBD: Analyze Direct vs.\ Order encoding trade-offs and the search-space pruning effect of SB1/SB2].
-
-\subsection{Discussion and Key Insights}
-\label{sec:discussion}
-
-Synthesizing the experimental observations across all three paradigms highlights four structural lessons:
-\begin{itemize}[noitemsep]
-    \item \textbf{CNF Structure vs.\ Raw Size:} [TBD --- discuss how bidirectional implications and unit propagation in NSC/Sequential Counter affect CDCL search compared to Totalizer/CardNetwrk and Order Encoding].
-    \item \textbf{Total Runtime Paradox on Harder Instances:} [TBD --- note that a configuration solving more hard instances within the cutoff can exhibit a higher cumulative solving time simply because those challenging instances count toward total time rather than timing out].
-    \item \textbf{Symmetry Breaking and Solver Heuristics:} [TBD --- contrast CaDiCaL~1.5.3 vs.\ Glucose~4.1 under symmetric conflict clauses and analyze SB1/SB2 impact].
-    \item \textbf{Exact Paradigm Trade-offs:} [TBD --- explain why CP-SAT excels on moderate instances via \texttt{AllDifferent} filtering, why ILP suffers from $O(w g n^2)$ $y$-variable memory growth, and when SAT dominates].
-\end{itemize}
+This comparison is pending the Order Encoding and symmetry modules.
+To separate the effect of representation from the effect of symmetry
+breaking, the comparison should use the same backend, instances and
+budget for three-index SAT and Order Encoding, then vary the verified
+symmetry restrictions within each representation. The clauses for each
+mode and its feasibility-preservation argument should be recorded with
+the results.
 
 \section{Conclusion}
 \label{sec:conclusion}
 
-In this paper, we presented a unified exact solving and verification framework for the Social Golfer Problem and conducted a systematic comparative evaluation spanning SAT cardinality encodings, Order Encoding, Constraint Programming, and Integer Linear Programming. All produced solutions were rigorously verified using an independent Universal Verifier, and theoretical partner-bound infeasibility was detected prior to solver invocation.
-
-Our experimental investigation yields the following primary conclusions:
-\begin{enumerate}[label=(\arabic*),noitemsep]
-    \item \textbf{C2 Cardinality Encoding Selection}: [TBD --- summarize the relative robustness and CNF footprint of \texttt{nsc}, \texttt{seqcounter}, \texttt{totalizer}, and \texttt{cardnetwrk}].
-    \item \textbf{Cross-Paradigm Scalability}: [TBD --- summarize solved-instance counts and runtime profiles among SAT (CaDiCaL/Glucose), OR-Tools CP-SAT, and Gurobi ILP].
-    \item \textbf{Representation and Symmetry Breaking}: [TBD --- summarize Direct vs.\ Order Encoding and the impact of SB1/SB2].
-\end{enumerate}
-
-\noindent\textbf{Limitations and Future Work:} Our current evaluation focuses on static SB1/SB2 symmetry breaking and fixed solver configurations. Promising directions for future work include incorporating dynamic or specialized symmetry-breaking predicates for $p\text{-}p\text{-}(p+1)$ instances \cite{liu2019sgp}, evaluating newer CDCL solvers such as Kissat, and hybridizing CP global propagation with SAT clause learning for large-scale tournament instances.
+The three-index SAT model supports four interchangeable CNF encodings
+for the group-size equality. The measured formulas illustrate a
+trade-off between auxiliary variables and clauses: in the four
+structural examples, NSC uses the fewest auxiliary variables and
+Sequential Counter emits the fewest clauses.
+The SAT screen confirmed 102 satisfiable configurations across 15 distinct instances. All decided cases agreed with the known source statuses. A larger evaluation requires resources to build the skipped formulas and a longer time budget for undecided runs.
+Order Encoding, symmetry breaking, and the comparison with exact CP and
+MIP solvers require additional implementations and a common experimental
+protocol.
 
 \section*{Group Contributions and Acknowledgments}
-This project was completed collaboratively by a team of three students for course INT3011E (Advanced Topics in Computer Science) at VNU University of Engineering and Technology under the supervision of Dr.~To Van Khanh:
+This project is a collaboration among three students for course INT3011E (Advanced Topics in Computer Science) at VNU University of Engineering and Technology under the supervision of Dr.~To Van Khanh:
 \begin{itemize}[noitemsep]
     \item \textbf{Do Huy Hieu (Member 1)}: Universal Solution Verifier, schedule display, shared CLI and DIMACS exporter, OR-Tools CP-SAT model, \texttt{cnsplots} visualization, and paper editing (Abstract, Introduction, CP formulation, Experiments, Conclusion).
-    \item \textbf{[Member 2 Full Name -- Huong] (Member 2)}: Three-index one-hot SAT encoding, custom NSC and PySAT \textit{Exactly}-$s$ encodings, isolated PySAT solver runner, dependencies, and SAT methodology sections.
+    \item \textbf{Pham Van Huong (Member 2)}: Three-index one-hot SAT encoding, custom NSC and PySAT \textit{Exactly}-$s$ encodings, isolated PySAT solver runner, dependencies, SAT methodology, and the SAT-only screening experiments.
     \item \textbf{[Member 3 Full Name] (Member 3)}: Order Encoding, ILP formulation, symmetry-breaking module, automated benchmark suite, and ILP/Order/Symmetry sections.
 \end{itemize}
 We gratefully acknowledge Dr.~To Van Khanh for his guidance, lectures, and reference research on SGP and Order Encoding.
 
 \section*{Data and Code Availability}
-All source code, benchmark scripts, raw experiment results, and verification tools developed in this study are publicly available at: \url{https://github.com/huong1105/INT3011E-SGP}.
+The project repository is \url{https://github.com/huong1105/INT3011E-SGP}. The SAT screening CSV, per-configuration JSON records, and environment metadata accompany the working copy. The final reproducibility archive is pending.
 
 \begin{thebibliography}{99}
 \small
@@ -526,10 +745,9 @@ A.~Biere, M.~Heule, H.~van~Maaren, and T.~Walsh (Eds.),
 \textit{Handbook of Satisfiability},
 vol.~336 of \textit{Frontiers in Artificial Intelligence and Applications}, 2nd ed., IOS Press, 2021.
 
-\bibitem{biere2024cadical}
-A.~Biere, T.~Faller, K.~Fazekas, M.~Fleury, N.~Froleyks, and F.~Pollitt,
-``CaDiCaL, Gimsatul, IsaSAT and Kissat Entering the SAT Competition 2024,''
-in \textit{Proc.\ SAT Competition 2024: Solver and Benchmark Descriptions}, pp.~8--10, 2024.
+\bibitem{cadical153}
+A.~Biere et al., \textit{CaDiCaL 1.5.3}, software release.
+\url{https://github.com/arminbiere/cadical/releases/tag/rel-1.5.3}
 
 \bibitem{briskorn2010sports}
 D.~Briskorn,
@@ -591,7 +809,12 @@ LNCS, vol.~10929, pp.~428--437, Springer, 2018.
 \bibitem{kieu2025nse}
 T.~V.~Kieu, N.~T.~Nguyen, and K.~V.~To,
 ``An Efficient SAT Encoding for Solving the Social Golfer Problem,''
-\textit{RAIRO -- Operations Research} (manuscript), VNU University of Engineering and Technology, 2025.
+\textit{RAIRO -- Operations Research}, vol.~60, no.~1, pp.~173--199, 2026. \url{https://doi.org/10.1051/ro/2025155}
+
+\bibitem{kieu-course-nse}
+T.~V.~Kieu, N.~T.~Nguyen, and K.~V.~To,
+\textit{An Efficient SAT Encoding for Solving the Social Golfer Problem},
+course-provided manuscript, Sections~4--5.
 
 \bibitem{lardeux2015sce}
 F.~Lardeux, E.~Monfroy, B.~Crawford, and R.~Soto,
@@ -599,9 +822,10 @@ F.~Lardeux, E.~Monfroy, B.~Crawford, and R.~Soto,
 \textit{Annals of Operations Research}, vol.~235, no.~1, pp.~423--452, 2015.
 
 \bibitem{lester2021mahjong}
-M.~Lester, J.~Petch, and B.~M.~Smith,
-``Scheduling Reach Mahjong Tournaments Using Pseudoboolean Constraints,''
-in \textit{Proc.\ 19th RCRA Workshop on Experimental Evaluation of Algorithms for Solving Problems with Combinatorial Explosion}, 2021.
+M.~M.~Lester, \textit{Scheduling Reach Mahjong Tournaments Using Pseudoboolean Constraints},
+in \textit{Theory and Applications of Satisfiability Testing (SAT 2021)},
+LNCS, vol.~12831, pp.~349--358, Springer, 2021.
+\url{https://doi.org/10.1007/978-3-030-80223-3_24}
 
 \bibitem{liu2019sgp}
 K.~Liu, S.~L{\"o}ffler, and P.~Hofstedt,
@@ -617,6 +841,22 @@ D.~C.~Montgomery,
 Google Developers,
 \textit{OR-Tools CP-SAT Solver Reference Documentation},
 \url{https://developers.google.com/optimization}, 2024.
+
+\bibitem{pysat-card-docs}
+PySAT developers, \textit{Cardinality Encodings (\texttt{pysat.card})}.
+\url{https://pysathq.github.io/docs/html/api/card.html}
+
+\bibitem{pysat-seqcounter-source}
+PySAT developers, \textit{Sequential Counter implementation}.
+\url{https://github.com/pysathq/pysat/blob/master/cardenc/seqcounter.hh}
+
+\bibitem{pysat-totalizer-source}
+PySAT developers, \textit{Totalizer implementation}.
+\url{https://github.com/pysathq/pysat/blob/master/cardenc/mto.hh}
+
+\bibitem{pysat-network-source}
+PySAT developers, \textit{Cardinality Network implementation}.
+\url{https://github.com/pysathq/pysat/blob/master/cardenc/sortcard.hh}
 
 \bibitem{sinz2005towards}
 C.~Sinz,
@@ -638,6 +878,12 @@ N.~Tamura, A.~Taga, S.~Kitagawa, and M.~Banbara,
 M.~Triska and N.~Musliu,
 ``An Improved SAT Formulation for the Social Golfer Problem,''
 \textit{Annals of Operations Research}, vol.~194, no.~1, pp.~427--438, 2012.
+
+\bibitem{verplancke2026}
+H.~Verplancke, D.~Van Bulck, V.~Lim\`ere, and N.~A.~Schmid,
+\textit{The (a)social exam invigilator assignment problem},
+Journal of Scheduling, vol.~29, pp.~185--202, 2026.
+\url{https://doi.org/10.1007/s10951-025-00868-7}
 
 \bibitem{walsh2006symmetry}
 T.~Walsh,

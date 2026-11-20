@@ -159,37 +159,40 @@ def _solve_pysat_in_process(clauses, backend, num_vars):
 def _run_pysat(clauses, backend, timeout_seconds, num_vars):
     """Chạy worker PySAT với giới hạn thời gian và đọc kết quả JSON."""
     result = _empty_result(backend, num_vars, len(clauses))
-    with tempfile.TemporaryDirectory(prefix="sgp-sat-") as directory:
-        input_path = Path(directory) / "input.json"
-        output_path = Path(directory) / "result.json"
-        input_path.write_text(json.dumps({"clauses": clauses, "backend": backend,
-                                         "num_vars": num_vars}), encoding="utf-8")
-        started = time.perf_counter()
-        try:
-            completed = subprocess.run(
-                [sys.executable, str(Path(__file__).resolve()), "--_worker",
-                 str(input_path), str(output_path)],
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=timeout_seconds, creationflags=_WINDOW_FLAGS,
-            )
-            if completed.returncode != 0:
-                result["error"] = (f"Worker exited with code {completed.returncode}: "
-                                   f"{completed.stderr[-2000:]}")
-            else:
-                try:
+    try:
+        with tempfile.TemporaryDirectory(prefix="sgp-sat-") as directory:
+            input_path = Path(directory) / "input.json"
+            output_path = Path(directory) / "result.json"
+            input_path.write_text(json.dumps({"clauses": clauses, "backend": backend,
+                                             "num_vars": num_vars}), encoding="utf-8")
+            started = time.perf_counter()
+            try:
+                completed = subprocess.run(
+                    [sys.executable, str(Path(__file__).resolve()), "--_worker",
+                     str(input_path), str(output_path)],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=timeout_seconds, creationflags=_WINDOW_FLAGS,
+                )
+                if completed.returncode != 0:
+                    result["error"] = (f"Worker exited with code {completed.returncode}: "
+                                       f"{completed.stderr[-2000:]}")
+                else:
                     candidate = json.loads(output_path.read_text(encoding="utf-8"))
                     if (not isinstance(candidate, dict)
                             or candidate.get("status") not in
                             {"SAT", "UNSAT", "UNAVAILABLE", "ERROR"}):
                         raise ValueError("invalid worker result")
                     result.update(candidate)
-                except (OSError, ValueError) as exc:
-                    result["error"] = f"Could not read worker result: {exc}"
-        except subprocess.TimeoutExpired:
-            result.update(status="TIMEOUT", error=f"Backend exceeded {timeout_seconds:g} seconds")
-        except OSError as exc:
-            result["error"] = f"Could not start worker: {exc}"
-        result["wall_time_seconds"] = time.perf_counter() - started
+            finally:
+                result["wall_time_seconds"] = time.perf_counter() - started
+    except subprocess.TimeoutExpired:
+        result.update(status="TIMEOUT", error=f"Backend exceeded {timeout_seconds:g} seconds")
+    except OverflowError as exc:
+        result.update(status="ERROR", model=None, error=f"Backend timeout out of range: {exc}")
+    except OSError as exc:
+        result.update(status="ERROR", model=None, error=f"Worker I/O failed: {exc}")
+    except ValueError as exc:
+        result.update(status="ERROR", model=None, error=f"Invalid worker data: {exc}")
     return result
 
 
@@ -301,7 +304,7 @@ def main(argv=None):
         print(f"UNAVAILABLE: {exc}", file=sys.stderr)
         return 3
     if arguments.json:
-        print(json.dumps(result, ensure_ascii=False))
+        print(json.dumps(result))
     else:
         print(f"{result['status']} | {result['backend']} | {result['encoding']} | "
               f"vars={result['num_vars']} clauses={result['num_clauses']} | "
