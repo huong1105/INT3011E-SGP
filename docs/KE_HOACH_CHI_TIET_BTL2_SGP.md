@@ -77,7 +77,7 @@
     - Áp dụng ràng buộc Social (số người trùng nhau giữa 2 nhóm ở 2 tuần khác nhau $\le 1$).
     - Giải, trích xuất và kiểm chứng nghiệm; ghi riêng thời gian xây dựng mô hình, wall time solve và toàn quá trình. Chỉ ghi CPU time khi đo được, không thay bằng wall time.
 - **`benchmarks/plot_cns.py` (Vẽ đồ thị CNSPlots):**
-  - Đọc file dữ liệu `results.csv` do TV3 chạy ra, dùng thư viện `cnsplots` vẽ:
+  - Đọc `results.csv` theo [chuẩn CSV benchmark v1](#5-chuẩn-csv-benchmark-v1), dùng `cnsplots` vẽ:
     - **Cactus Plot:** So sánh số bài toán giải được theo thời gian giữa SAT (Cadical), CP (CP-SAT), và ILP (Gurobi).
     - **Runtime Line Plot:** So sánh thời gian chạy của 4 bộ mã hóa C2 Exactly-$s$ (NSC, Sequential Counter, Totalizer, Cardinality Network) khi số người $n$ tăng dần; giữ C1, C3, solver và cấu hình SB giống nhau.
     - **Bar Plot:** So sánh hiệu năng Direct Encoding vs. Order Encoding.
@@ -204,7 +204,7 @@ ILP, triển khai symmetry breaking và benchmark chung thuộc các phần vi�
 - **`benchmarks/run_all.py` (Benchmark Suite tự động):**
   - Dùng `benchmarks/benchmark_instances.csv` chứa 66 instance tham khảo và các ca biên bổ sung; quy đổi đúng `(g,p,w)` sang `(w,g,s)`. Chọn phạm vi/tài nguyên thực nghiệm công khai, không mặc định một dải tham số nhỏ đã đại diện cho bài nguồn.
   - Với SAT Direct, đo 4 bộ mã hóa C2 (`nsc`, `seqcounter`, `totalizer`, `cardnetwrk`) $\times$ các SAT solver khả dụng $\times$ cấu hình SB; giữ C1 và C3 cố định. Chạy Order Encoding khi đã triển khai; chạy CP và ILP thành các cấu hình đối chứng riêng trên cùng bộ test và giới hạn thời gian.
-  - Xuất dữ liệu sạch ra file `benchmarks/results.csv` cho TV1.
+  - Xuất `benchmarks/results.csv` đúng [chuẩn CSV benchmark v1](#5-chuẩn-csv-benchmark-v1) cho TV1.
 
 ### 3. Viết những phần nào trong Bài báo Elsevier (`cas-sc`) & Slide?
 - **Section 2: Background (Phần ILP Formulation):** Mô tả toán học mô hình ILP cho SGP và kỹ thuật tuyến tính hóa tích biến nhị phân qua biến phụ.
@@ -222,3 +222,41 @@ ILP, triển khai symmetry breaking và benchmark chung thuộc các phần vi�
 - **Tuần 4 (Sprint Code 2):** TV1 code `cp_solver.py`; TV2 hoàn thiện `sat_runner.py`; TV3 code `order_encoder.py` và `run_all.py`. **Mốc M3: Chạy thành công SGP(2,2,2) và SGP(3,3,3) trên cả SAT, CP, ILP!**
 - **Tuần 5 (Thực nghiệm):** TV3 chạy `run_all.py` xuất `results.csv`; TV1 dùng `cnsplots` vẽ toàn bộ biểu đồ; TV2 hoàn thiện code SAT và giữ mô tả ngắn cho file/hàm.
 - **Tuần 6 (Báo cáo & Thuyết trình):** Cả nhóm ráp bài báo LaTeX `cas-sc`; TV2 hoàn thiện README GitHub; TV3 hoàn thiện Slide và kịch bản Demo; tập dượt thuyết trình và nộp bài.
+
+---
+
+## 5. Chuẩn CSV benchmark v1
+
+Dùng một định dạng `results.csv` để so sánh SAT Direct, Order Encoding, CP-SAT và ILP. Mỗi dòng ghi kết quả của một bài với một tổ hợp **phương pháp, encoder và solver**. Cấu hình cố định của đợt đo như SB, cutoff, số luồng, phiên bản solver và máy chạy ghi một lần trong phần thiết lập thực nghiệm. Dùng UTF-8, dấu phẩy và dấu chấm thập phân.
+
+```csv
+instance,n,method,encoding,solver,status,encode_time_seconds,solver_wall_time_seconds,total_time_seconds,num_vars,num_clauses,num_constraints,error
+```
+
+| Cột | Ý nghĩa |
+| --- | --- |
+| `instance` | Nhãn SGP theo `g-s-w`. Ví dụ `2-2-3` là 2 nhóm, mỗi nhóm 2 người, chơi 3 tuần. |
+| `n` | Tổng số người, bằng `g*s`. Dùng làm trục ngang khi vẽ theo kích thước bài. |
+| `method` | Phương pháp `sat`, `order`, `cp` hoặc `ilp`. |
+| `encoding` | SAT dùng `nsc`, `seqcounter`, `totalizer` hoặc `cardnetwrk`; Order ghi `order`; CP/ILP để trống. |
+| `solver` | Backend đã chọn, ví dụ `cadical`, `glucose`, `cp-sat` hoặc `gurobi`. Dùng một cột này cho mọi phương pháp. |
+| `status` | `SAT` khi lịch đã được kiểm chứng; `UNSAT` khi solver kết luận vô nghiệm; `UNSAT_PRECHECK` khi loại bằng cận đối tác. Giữ riêng `TIMEOUT`, `SKIPPED_RESOURCE_LIMIT`, `UNAVAILABLE` và `ERROR`. |
+| `encode_time_seconds` | Giây sinh CNF cho SAT/Order hoặc dựng mô hình cho CP/ILP. |
+| `solver_wall_time_seconds` | Giây solver thực sự giải sau khi dựng mô hình. |
+| `total_time_seconds` | Giây từ trước bước precheck/dựng đến khi có kết quả đã kiểm chứng hoặc hết giờ. Bao gồm nạp dữ liệu vào solver và kiểm chứng. |
+| `num_vars` | Tổng số biến của CNF hoặc mô hình đã dựng, trước khi giải. |
+| `num_clauses` | Số mệnh đề của CNF, dành cho SAT/Order. |
+| `num_constraints` | Số ràng buộc của mô hình CP/ILP. |
+| `error` | Lý do ngắn khi lỗi, hết giờ, thiếu solver hoặc bỏ qua. Lượt bình thường để trống. |
+
+Ví dụ minh họa cách ghi, các thời gian bên dưới là số ví dụ:
+
+```csv
+2-2-3,4,sat,nsc,cadical,SAT,0.001,0.002,0.015,54,210,,
+2-2-3,4,cp,,cp-sat,SAT,0.004,0.010,0.016,54,,66,
+2-2-4,4,sat,nsc,cadical,UNSAT_PRECHECK,,,0.001,,,,
+```
+
+**Quy tắc ghi và vẽ.** Nếu chưa dựng/giải như ở `UNSAT_PRECHECK`, để trống số đo và kích thước tương ứng. `0` chỉ khi đo hoặc đếm được bằng 0. `num_clauses` và `num_constraints` là hai loại số đếm riêng. Khi dùng cùng một cấu hình chạy, khóa mỗi dòng theo `(instance, method, encoding, solver)`. Nếu thử lại, chỉ lấy một kết quả theo quy tắc của đợt đo. TV1 dùng `total_time_seconds` với cùng tập bài và cutoff để so sánh. Tách precheck khỏi số bài solver giải được.
+
+**Trước đợt đo lại.** TV3 cập nhật bộ ghi, TV1 cập nhật bộ đọc biểu đồ, TV2 kiểm tra nhánh SAT và số mệnh đề/biến. Chạy trước `2-2-3` (SAT), `2-3-2` (UNSAT do solver), `2-2-4` (UNSAT do cận) và một ca timeout để kiểm tra trạng thái, ô trống và cách đếm. Các lượt chính bắt đầu bằng file mới đúng header trên.
