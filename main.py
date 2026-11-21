@@ -14,6 +14,7 @@ from src.io_utils import (
     export_dimacs,
     parse_args,
     safe_print,
+    write_csv_v1_row,
 )
 from src.sat_direct_encoders import encode_sgp
 from src.sat_runner import solve_sgp
@@ -185,8 +186,13 @@ def main(argv: list[str] | None = None) -> int:
         safe_print(f"[Error] {exc}", stream=sys.stderr)
         return 1
 
+    if args.csv:
+        csv_path = write_csv_v1_row(result, args.csv)
+        if not args.json:
+            safe_print(f"Appended CSV v1 row to: {csv_path}")
+
     if args.json:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2, ensure_ascii=True))
     else:
         print_result(
             result,

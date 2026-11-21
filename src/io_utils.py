@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 from pathlib import Path
 import sys
@@ -19,6 +20,22 @@ DEFAULT_SOLVER_BY_METHOD = {
     "cp": "cp-sat",
     "ilp": "gurobi",
 }
+
+BENCHMARK_CSV_V1_FIELDS = (
+    "instance",
+    "n",
+    "method",
+    "encoding",
+    "solver",
+    "status",
+    "encode_time_seconds",
+    "solver_wall_time_seconds",
+    "total_time_seconds",
+    "num_vars",
+    "num_clauses",
+    "num_constraints",
+    "error",
+)
 
 
 def _validate_positive_int(name: str, value: int) -> None:
@@ -153,6 +170,113 @@ def safe_print(message: str, stream: Any = None) -> None:
         print(encoded, file=target)
 
 
+def _csv_cell(value: Any) -> Any:
+    """Chuyển None thành chuỗi rỗng để ghi CSV."""
+    return "" if value is None else value
+
+
+def _is_plain_int(value: Any) -> bool:
+    """Kiểm tra giá trị là số nguyên thuần (không phải bool)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def result_to_csv_v1_row(result: dict[str, Any]) -> dict[str, Any]:
+    """Chuẩn hóa kết quả solver thành một dòng chuẩn CSV benchmark v1."""
+    w = result.get("w")
+    g = result.get("g")
+    s = result.get("s")
+    if _is_plain_int(w) and _is_plain_int(g) and _is_plain_int(s):
+        instance = f"{g}-{s}-{w}"
+    else:
+        instance = str(result.get("instance") or "").strip()
+
+    if _is_plain_int(g) and _is_plain_int(s):
+        n: Any = g * s
+    else:
+        n = _csv_cell(result.get("n"))
+
+    method = str(result.get("method") or "").strip().lower()
+    if method == "sat":
+        encoding = str(result.get("encoding") or "").strip().lower()
+    elif method == "order":
+        encoding = "order"
+    else:
+        encoding = ""
+
+    solver = str(result.get("solver") or "").strip().lower()
+    if not solver:
+        if method == "cp":
+            solver = "cp-sat"
+        elif method == "ilp":
+            solver = "gurobi"
+
+    stats = result.get("stats")
+    is_precheck = (result.get("backend_type") == "precheck") or (
+        isinstance(stats, dict) and bool(stats.get("precheck_unsat"))
+    )
+    status = (
+        "UNSAT_PRECHECK"
+        if is_precheck
+        else str(result.get("status") or "ERROR").strip().upper()
+    )
+    error = " ".join(str(result.get("error") or "").split())
+
+    if status in ("UNSAT_PRECHECK", "SKIPPED_RESOURCE_LIMIT"):
+        encode_time: Any = ""
+        solver_wall: Any = ""
+        num_vars: Any = ""
+        num_clauses: Any = ""
+        num_constraints: Any = ""
+        total_time: Any = _csv_cell(result.get("total_time_seconds"))
+    else:
+        encode_val = result.get("encode_time_seconds")
+        if encode_val is None:
+            encode_val = result.get("model_build_time_seconds")
+        encode_time = _csv_cell(encode_val)
+        solver_wall = _csv_cell(result.get("solver_wall_time_seconds"))
+        total_time = _csv_cell(result.get("total_time_seconds"))
+        num_vars = _csv_cell(result.get("num_vars"))
+        num_clauses = _csv_cell(result.get("num_clauses")) if method in ("sat", "order") else ""
+        num_constraints = (
+            _csv_cell(result.get("num_constraints")) if method in ("cp", "ilp") else ""
+        )
+
+    return {
+        "instance": instance,
+        "n": n,
+        "method": method,
+        "encoding": encoding,
+        "solver": solver,
+        "status": status,
+        "encode_time_seconds": encode_time,
+        "solver_wall_time_seconds": solver_wall,
+        "total_time_seconds": total_time,
+        "num_vars": num_vars,
+        "num_clauses": num_clauses,
+        "num_constraints": num_constraints,
+        "error": error,
+    }
+
+
+def write_csv_v1_row(
+    result: dict[str, Any],
+    filepath: str | Path,
+    append: bool = True,
+) -> Path:
+    """Ghi một dòng kết quả theo chuẩn CSV benchmark v1."""
+    target = Path(filepath)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    mode = "a" if append and target.exists() else "w"
+    needs_header = (mode == "w") or (target.stat().st_size == 0)
+    row = result_to_csv_v1_row(result)
+    with target.open(mode, encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(BENCHMARK_CSV_V1_FIELDS))
+        if needs_header:
+            writer.writeheader()
+        writer.writerow(row)
+    return target
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Tạo CLI parser chung cho dự án."""
     parser = argparse.ArgumentParser(
@@ -206,6 +330,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="output path for DIMACS .cnf export (when --method sat)",
+    )
+    parser.add_argument(
+        "--csv",
+        type=str,
+        default=None,
+        help="output path to append benchmark CSV v1 row",
     )
     parser.add_argument(
         "--zero-based",

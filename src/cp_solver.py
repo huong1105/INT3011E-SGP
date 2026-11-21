@@ -12,7 +12,7 @@ import sys
 import time
 from typing import Any
 
-from .io_utils import VALID_SB_MODES, check_partner_bound, configure_safe_stdio
+from .io_utils import VALID_SB_MODES, check_partner_bound, configure_safe_stdio, safe_print, write_csv_v1_row
 from .verifier import verify_schedule
 
 try:
@@ -123,6 +123,8 @@ def build_cp_model(
             for i in range(limit):
                 model.Add(group_of[(k, i)] == i)
 
+    num_total_vars = len(model.Proto().variables)
+    num_constraints = len(model.Proto().constraints)
     model_stats = {
         "n": n,
         "g": g,
@@ -130,7 +132,8 @@ def build_cp_model(
         "w": w,
         "num_int_vars": num_int_vars,
         "num_bool_vars": num_bool_vars,
-        "num_total_vars": num_int_vars + num_bool_vars,
+        "num_total_vars": num_total_vars,
+        "num_constraints": num_constraints,
     }
     return model, slot, model_stats
 
@@ -179,18 +182,23 @@ def solve_sgp_cp(
         "solver": "cp-sat",
         "backend": "ortools-cp-sat",
         "backend_type": "ortools",
+        "solver_version": _get_ortools_version(),
         "ortools_version": _get_ortools_version(),
+        "solver_status": None,
         "w": w,
         "g": g,
         "s": s,
         "n": n,
         "sb": sb,
         "num_workers": num_workers,
-        "model_build_time_seconds": 0.0,
+        "encode_time_seconds": None,
+        "model_build_time_seconds": None,
         "solver_wall_time_seconds": None,
         "wall_time_seconds": 0.0,
         "cpu_time_seconds": None,
         "total_time_seconds": 0.0,
+        "num_vars": None,
+        "num_constraints": None,
         "conflicts": None,
         "branches": None,
         "stats": None,
@@ -207,7 +215,7 @@ def solve_sgp_cp(
             status="UNSAT",
             backend="theoretical-bound",
             backend_type="precheck",
-            solver_wall_time_seconds=0.0,
+            solver_wall_time_seconds=None,
             wall_time_seconds=elapsed,
             total_time_seconds=elapsed,
             stats={
@@ -239,7 +247,10 @@ def solve_sgp_cp(
         model_stats["w_max"] = w_max
         model_stats["precheck_unsat"] = False
         model_stats["unsat_reason"] = None
+        base_result["encode_time_seconds"] = build_time
         base_result["model_build_time_seconds"] = build_time
+        base_result["num_vars"] = model_stats["num_total_vars"]
+        base_result["num_constraints"] = model_stats["num_constraints"]
         base_result["stats"] = model_stats
 
         solver = cp_model.CpSolver()
@@ -253,6 +264,7 @@ def solve_sgp_cp(
         status_code = solver.Solve(model)
         solve_outer_wall = time.perf_counter() - solve_start
         solve_cpu = time.process_time() - solve_cpu_start
+        base_result["solver_status"] = solver.StatusName(status_code)
 
         solver_wall = solver.WallTime()
         base_result["solver_wall_time_seconds"] = (
@@ -328,6 +340,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=None, help="CP-SAT search workers")
     parser.add_argument("--zero-based", action="store_true", help="display 0-based player indices")
     parser.add_argument("--json", action="store_true", help="print complete JSON result")
+    parser.add_argument(
+        "--csv",
+        type=str,
+        default=None,
+        help="output path to append benchmark CSV v1 row",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -342,8 +360,13 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
+    if args.csv:
+        csv_path = write_csv_v1_row(result, args.csv)
+        if not args.json:
+            safe_print(f"Appended CSV v1 row to: {csv_path}")
+
     if args.json:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2, ensure_ascii=True))
     else:
         print_result(result, one_based=not args.zero_based)
 

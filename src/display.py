@@ -116,7 +116,7 @@ def format_result_summary(result: dict[str, Any]) -> str:
     n = g * s if isinstance(g, int) and isinstance(s, int) else result.get("n")
     method = result.get("method", "unknown")
     solver = result.get("solver", result.get("backend", "unknown"))
-    status = result.get("status", "UNKNOWN")
+    status = "UNSAT_PRECHECK" if result.get("backend_type") == "precheck" else result.get("status", "UNKNOWN")
     verified = result.get("verified", False)
 
     lines = [
@@ -131,9 +131,20 @@ def format_result_summary(result: dict[str, Any]) -> str:
 
     lines.append(f"Status   : {status} | Verified: {verified}")
 
-    build_t = result.get("model_build_time_seconds", result.get("encode_time_seconds"))
+    num_vars = result.get("num_vars")
+    if num_vars is not None:
+        model_parts = [f"vars={num_vars}"]
+        if result.get("num_clauses") is not None:
+            model_parts.append(f"clauses={result['num_clauses']}")
+        if result.get("num_constraints") is not None:
+            model_parts.append(f"constraints={result['num_constraints']}")
+        lines.append("Model    : " + " | ".join(model_parts))
+
+    build_t = result.get("encode_time_seconds")
+    if build_t is None:
+        build_t = result.get("model_build_time_seconds")
     if build_t is not None:
-        label = "Encode time" if "encode_time_seconds" in result else "Build time "
+        label = "Encode time" if result.get("encode_time_seconds") is not None else "Build time "
         lines.append(f"{label}: {_fmt_seconds(build_t)}")
     if "solver_wall_time_seconds" in result:
         lines.append(f"Solve wall : {_fmt_seconds(result.get('solver_wall_time_seconds'))}")
