@@ -4,8 +4,8 @@ Quy ước CSV:
 - `backend_type=precheck`: lượt kết luận bằng cận đối tác, `solver_wall_time_seconds`
   để trống cho cả bốn phương pháp và không đưa vào biểu đồ so sánh solver.
 - `solver_status`: trạng thái backend (ví dụ `TIME_LIMIT` của Gurobi) tách khỏi `status`.
-- `timeout_seconds`/`timeout_scope`/`attempt`: khóa của `--resume`; chỉ `SAT`/`UNSAT`/
-  `SKIPPED_RESOURCE_LIMIT` là trạng thái kết thúc, các trạng thái khác được thử lại.
+- `--resume` yêu cầu CSV có đúng tiêu đề cột và giữ kết quả `SAT`/`UNSAT` đã có.
+  Lượt `SKIPPED_RESOURCE_LIMIT` được thử lại nếu ngưỡng hiện tại cho phép.
 - Lượt CNF vượt `--max-clauses` bị ghi `SKIPPED_RESOURCE_LIMIT` trước khi dựng CNF.
 - `--run-budget` chạy mỗi lượt trong worker riêng và hard-cap toàn bộ thời gian kể từ
   lúc bắt đầu dựng mô hình; khi đó `timeout_scope=total`, `timeout_seconds` là ngân sách.
@@ -36,7 +36,7 @@ SAT_SOLVERS = ("cadical", "glucose")
 SB_MODES = ("none", "sb1", "full")
 
 CNF_METHODS = ("sat", "order")
-TERMINAL_STATUSES = ("SAT", "UNSAT", "SKIPPED_RESOURCE_LIMIT")
+TERMINAL_STATUSES = ("SAT", "UNSAT")
 DEFAULT_MAX_CLAUSES = 5_000_000
 TIMEOUT_SCOPE = "solver"
 WORKER_FLAG = "--_worker"
@@ -340,7 +340,13 @@ def _load_done(path):
     if not path.exists() or path.stat().st_size == 0:
         return done
     with path.open(encoding="utf-8-sig", newline="") as handle:
-        for row in csv.DictReader(handle):
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != FIELDS:
+            raise ValueError(
+                f"{path}: incompatible CSV header; use a new --output file "
+                "or migrate the existing CSV before using --resume"
+            )
+        for row in reader:
             key = (row.get("instance", ""), row.get("method", ""),
                    row.get("encoding", ""), row.get("solver", ""),
                    row.get("sb", ""), row.get("timeout_seconds", ""),
@@ -406,7 +412,10 @@ def main(argv=None):
     run_budget = max(0.0, args.run_budget)
     timeout_scope = "total" if run_budget > 0 else TIMEOUT_SCOPE
     case_timeout = run_budget if run_budget > 0 else args.timeout
-    done = _load_done(output) if args.resume else {}
+    try:
+        done = _load_done(output) if args.resume else {}
+    except ValueError as exc:
+        parser.error(str(exc))
     mode = "a" if args.resume and output.exists() else "w"
     start_all = time.perf_counter()
     written = 0
@@ -422,11 +431,16 @@ def main(argv=None):
             handle.flush()
 
         for index, instance in enumerate(instances, start=1):
+            estimate = estimate_cnf_clauses(instance["w"], instance["g"], instance["s"])
             for case in cases:
                 key = ((instance["label"],) + case
                        + (f"{case_timeout:g}", timeout_scope))
                 previous = done.get(key)
                 if previous is not None and previous[0] in TERMINAL_STATUSES:
+                    continue
+                over_cap = (case[0] in CNF_METHODS and args.max_clauses > 0
+                            and estimate > args.max_clauses)
+                if previous is not None and previous[0] == "SKIPPED_RESOURCE_LIMIT" and over_cap:
                     continue
                 attempt = previous[1] + 1 if previous is not None else 1
                 if (args.budget_seconds is not None
@@ -435,9 +449,7 @@ def main(argv=None):
                     stopped = True
                     break
                 started = time.perf_counter()
-                estimate = estimate_cnf_clauses(instance["w"], instance["g"], instance["s"])
-                if (case[0] in CNF_METHODS and args.max_clauses > 0
-                        and estimate > args.max_clauses):
+                if over_cap:
                     result = {
                         "status": "SKIPPED_RESOURCE_LIMIT",
                         "error": (f"estimated {estimate:,} C3 clauses (lower bound) "
