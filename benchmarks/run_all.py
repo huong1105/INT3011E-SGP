@@ -1,11 +1,24 @@
-"""Chạy benchmark SGP trên bốn phương pháp và xuất results.csv cho CNSPlots."""
+"""Chạy benchmark SGP trên bốn phương pháp và xuất results.csv cho CNSPlots.
+
+Quy ước CSV:
+- `backend_type=precheck`: lượt kết luận bằng cận đối tác, `solver_wall_time_seconds`
+  để trống cho cả bốn phương pháp và không đưa vào biểu đồ so sánh solver.
+- `solver_status`: trạng thái backend (ví dụ `TIME_LIMIT` của Gurobi) tách khỏi `status`.
+- `timeout_seconds`/`timeout_scope`/`attempt`: khóa của `--resume`; chỉ `SAT`/`UNSAT`/
+  `SKIPPED_RESOURCE_LIMIT` là trạng thái kết thúc, các trạng thái khác được thử lại.
+- Lượt CNF vượt `--max-clauses` bị ghi `SKIPPED_RESOURCE_LIMIT` trước khi dựng CNF.
+- Khi vẽ, mỗi khóa chỉ lấy dòng có `attempt` lớn nhất để tránh đếm lặp; so sánh
+  hiệu năng dùng `total_time_seconds <= timeout_seconds` và loại dòng precheck.
+"""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import sys
 import time
 from datetime import datetime
+from math import comb
 from pathlib import Path
 
 from src.io_utils import configure_safe_stdio, parse_paper_instance
@@ -16,15 +29,27 @@ C2_ENCODINGS = ("nsc", "seqcounter", "totalizer", "cardnetwrk")
 SAT_SOLVERS = ("cadical", "glucose")
 SB_MODES = ("none", "sb1", "full")
 
+CNF_METHODS = ("sat", "order")
+TERMINAL_STATUSES = ("SAT", "UNSAT", "SKIPPED_RESOURCE_LIMIT")
+DEFAULT_MAX_CLAUSES = 5_000_000
+TIMEOUT_SCOPE = "solver"
+
 FIELDS = [
     "instance", "w", "g", "s", "n",
     "method", "encoding", "solver", "sb",
-    "status", "verified",
+    "timeout_seconds", "timeout_scope", "attempt",
+    "status", "verified", "backend_type", "solver_status",
     "solver_wall_time_seconds", "encode_time_seconds",
     "total_time_seconds", "cpu_time_seconds",
     "num_vars", "num_clauses", "conflicts",
     "expected_status", "error", "timestamp",
 ]
+
+
+def estimate_cnf_clauses(w, g, s):
+    """Ước lượng cận dưới số clause CNF; C3 chiếm phần lớn ở instance lớn."""
+    n = g * s
+    return comb(n, 2) * comb(w, 2) * g * g
 
 
 def _split(value, allowed, flag):
@@ -39,15 +64,16 @@ def _split(value, allowed, flag):
 
 
 def load_instances(path):
-    """Đọc CSV instance (label,w,g,s,expected_status,enabled,note), bỏ dòng enabled=0."""
+    """Đọc CSV instance (label|paper_label,w,g,s,expected_status,enabled,note), bỏ dòng enabled=0."""
     rows = []
     skipped = 0
     with Path(path).open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        if reader.fieldnames is None or "label" not in reader.fieldnames:
-            raise ValueError(f"{path}: missing 'label' column")
+        fieldnames = reader.fieldnames or []
+        if "label" not in fieldnames and "paper_label" not in fieldnames:
+            raise ValueError(f"{path}: missing 'label' or 'paper_label' column")
         for raw in reader:
-            label = (raw.get("label") or "").strip()
+            label = (raw.get("label") or raw.get("paper_label") or "").strip()
             if not label:
                 continue
             if (raw.get("enabled") or "1").strip().lower() in ("0", "false", "no"):
@@ -118,7 +144,7 @@ def run_case(instance, case, timeout_seconds):
     return solve_sgp_ilp(w, g, s, timeout_seconds=timeout_seconds, sb=sb)
 
 
-def build_row(instance, case, result):
+def build_row(instance, case, result, timeout_seconds, attempt):
     """Chuẩn hóa kết quả solver thành một dòng CSV, kiểm chứng lại độc lập."""
     method, encoding, solver, sb = case
     w, g, s = instance["w"], instance["g"], instance["s"]
@@ -128,12 +154,18 @@ def build_row(instance, case, result):
     if status == "SAT" and schedule:
         independent, _ = verify_schedule(schedule, w, g, s)
         verified = verified and independent
+    precheck = result.get("backend_type") == "precheck"
+    solver_wall = None if precheck else result.get("solver_wall_time_seconds")
     return {
         "instance": instance["label"], "w": w, "g": g, "s": s, "n": g * s,
         "method": method, "encoding": encoding,
         "solver": result.get("solver", solver), "sb": sb,
+        "timeout_seconds": timeout_seconds, "timeout_scope": TIMEOUT_SCOPE,
+        "attempt": attempt,
         "status": status, "verified": verified,
-        "solver_wall_time_seconds": result.get("solver_wall_time_seconds"),
+        "backend_type": "precheck" if precheck else "",
+        "solver_status": result.get("solver_status") or "",
+        "solver_wall_time_seconds": solver_wall,
         "encode_time_seconds": result.get("encode_time_seconds",
                                           result.get("model_build_time_seconds")),
         "total_time_seconds": result.get("total_time_seconds"),
@@ -153,14 +185,23 @@ def _format(value):
 
 
 def _load_done(path):
-    """Đọc khóa các dòng đã có để --resume bỏ qua."""
-    done = set()
+    """Đọc trạng thái các lượt đã có: khóa (gồm timeout và scope) -> (status, attempt)."""
+    done = {}
     if not path.exists() or path.stat().st_size == 0:
         return done
     with path.open(encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
-            done.add((row["instance"], row["method"], row["encoding"],
-                      row["solver"], row["sb"]))
+            key = (row.get("instance", ""), row.get("method", ""),
+                   row.get("encoding", ""), row.get("solver", ""),
+                   row.get("sb", ""), row.get("timeout_seconds", ""),
+                   row.get("timeout_scope", ""))
+            try:
+                attempt = int(row.get("attempt") or 1)
+            except (TypeError, ValueError):
+                attempt = 1
+            previous = done.get(key)
+            done[key] = (row.get("status", "").upper(),
+                         max(attempt, previous[1] if previous else attempt))
     return done
 
 
@@ -168,13 +209,16 @@ def main(argv=None):
     """Chạy suite benchmark theo tham số CLI và ghi results.csv tăng dần."""
     configure_safe_stdio()
     parser = argparse.ArgumentParser(description="SGP benchmark suite -> results.csv")
-    parser.add_argument("--instances", default="data/sgp_paper_instances.csv")
+    parser.add_argument("--instances", default="benchmarks/benchmark_instances.csv")
     parser.add_argument("--output", default="benchmarks/results.csv")
     parser.add_argument("--methods", default=",".join(METHODS))
     parser.add_argument("--encodings", default=",".join(C2_ENCODINGS))
     parser.add_argument("--solvers", default=",".join(SAT_SOLVERS))
     parser.add_argument("--sb", default="none")
-    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--timeout", type=float, default=60.0,
+                        help="giới hạn cho tiến trình solver (không gồm dựng CNF)")
+    parser.add_argument("--max-clauses", type=int, default=DEFAULT_MAX_CLAUSES,
+                        help="chặn trước khi dựng CNF nếu C3 ước lượng vượt ngưỡng (0 = tắt)")
     parser.add_argument("--limit", type=int, default=None,
                         help="chỉ chạy N instance đầu tiên (đã sắp theo n tăng dần)")
     parser.add_argument("--budget-seconds", type=float, default=None,
@@ -204,10 +248,12 @@ def main(argv=None):
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    done = _load_done(output) if args.resume else set()
+    done = _load_done(output) if args.resume else {}
     mode = "a" if args.resume and output.exists() else "w"
     start_all = time.perf_counter()
     written = 0
+    error_rows = 0
+    precheck_rows = 0
     counts = {}
     stopped = False
 
@@ -219,27 +265,43 @@ def main(argv=None):
 
         for index, instance in enumerate(instances, start=1):
             for case in cases:
-                key = (instance["label"],) + case
-                if key in done:
+                key = ((instance["label"],) + case
+                       + (f"{args.timeout:g}", TIMEOUT_SCOPE))
+                previous = done.get(key)
+                if previous is not None and previous[0] in TERMINAL_STATUSES:
                     continue
+                attempt = previous[1] + 1 if previous is not None else 1
                 if (args.budget_seconds is not None
                         and time.perf_counter() - start_all > args.budget_seconds):
                     print("[stop] budget-seconds exhausted")
                     stopped = True
                     break
                 started = time.perf_counter()
-                try:
-                    result = run_case(instance, case, args.timeout)
-                except NotImplementedError as exc:
-                    result = {"status": "UNAVAILABLE", "error": str(exc)}
-                except Exception as exc:
-                    result = {"status": "ERROR",
-                              "error": f"{type(exc).__name__}: {exc}"}
-                row = build_row(instance, case, result)
+                estimate = estimate_cnf_clauses(instance["w"], instance["g"], instance["s"])
+                if (case[0] in CNF_METHODS and args.max_clauses > 0
+                        and estimate > args.max_clauses):
+                    result = {
+                        "status": "SKIPPED_RESOURCE_LIMIT",
+                        "error": (f"estimated {estimate:,} C3 clauses (lower bound) "
+                                  f"> cap {args.max_clauses:,}"),
+                    }
+                else:
+                    try:
+                        result = run_case(instance, case, args.timeout)
+                    except NotImplementedError as exc:
+                        result = {"status": "UNAVAILABLE", "error": str(exc)}
+                    except Exception as exc:
+                        result = {"status": "ERROR",
+                                  "error": f"{type(exc).__name__}: {exc}"}
+                row = build_row(instance, case, result, f"{args.timeout:g}", attempt)
                 writer.writerow({field: _format(row[field]) for field in FIELDS})
                 handle.flush()
                 written += 1
-                done.add(key)
+                done[key] = (row["status"], attempt)
+                if row["status"] == "ERROR":
+                    error_rows += 1
+                if row["backend_type"] == "precheck":
+                    precheck_rows += 1
                 elapsed = time.perf_counter() - started
                 counts[(case[0], row["status"])] = counts.get(
                     (case[0], row["status"]), 0) + 1
@@ -248,13 +310,17 @@ def main(argv=None):
                     mark = f"  [!] expected {row['expected_status']}"
                 print(f"[{index}/{len(instances)}] {instance['label']:>7} "
                       f"{case[0]:>5} {case[1] or '-':>11} {case[2]:>7} sb={case[3]:<4} "
-                      f"-> {row['status']:>7} {elapsed:6.2f}s{mark}", flush=True)
+                      f"-> {row['status']:>21} {elapsed:6.2f}s{mark}", flush=True)
             if stopped:
                 break
 
     print(f"\nWritten rows: {written} -> {output}")
     for (method, status), count in sorted(counts.items()):
-        print(f"  {method:>5} {status:>11}: {count}")
+        print(f"  {method:>5} {status:>21}: {count}")
+    print(f"  precheck (decided by bound): {precheck_rows}")
+    if error_rows:
+        print(f"[error] {error_rows} lượt kết thúc với status=ERROR", file=sys.stderr)
+        return 1
     return 0
 
 

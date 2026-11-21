@@ -127,7 +127,7 @@ def solve_sgp_ilp(w, g, s, timeout_seconds=None, sb="none"):
         "wall_time_seconds": 0.0, "cpu_time_seconds": None, "total_time_seconds": 0.0,
         "num_vars": None, "num_constraints": None, "num_binary_vars": None,
         "stats": None, "schedule": None, "verified": False,
-        "verification_errors": [], "error": None,
+        "verification_errors": [], "error": None, "solver_status": None,
               }
     feasible_bound, w_max, unsat_reason = check_partner_bound(w, g, s)
 
@@ -182,6 +182,14 @@ def solve_sgp_ilp(w, g, s, timeout_seconds=None, sb="none"):
     result["num_binary_vars"] = model.NumBinVars
 
     status = model.Status
+    result["solver_status"] = {
+        GRB.OPTIMAL: "OPTIMAL",
+        GRB.INFEASIBLE: "INFEASIBLE",
+        GRB.TIME_LIMIT: "TIME_LIMIT",
+        GRB.INF_OR_UNBD: "INF_OR_UNBD",
+        GRB.UNBOUNDED: "UNBOUNDED",
+        GRB.INTERRUPTED: "INTERRUPTED",
+    }.get(status, f"STATUS_{status}")
     if status == GRB.OPTIMAL:
         schedule = _extract_schedule(x, w, g, s)
         valid, errors = verify_schedule(schedule, w, g, s)
@@ -193,7 +201,21 @@ def solve_sgp_ilp(w, g, s, timeout_seconds=None, sb="none"):
     elif status == GRB.INFEASIBLE:
         result["status"] = "UNSAT"
     elif status == GRB.TIME_LIMIT:
-        result.update(status="TIMEOUT", error=f"Gurobi exceeded {timeout_seconds:g} seconds")
+        # Giữ và kiểm chứng lịch đã tìm được trong thời gian cho phép.
+        if model.SolCount > 0:
+            schedule = _extract_schedule(x, w, g, s)
+            valid, errors = verify_schedule(schedule, w, g, s)
+            result["verification_errors"] = errors
+            if valid:
+                result.update(status="SAT", schedule=schedule, verified=True,
+                              error=f"Gurobi TIME_LIMIT at {timeout_seconds:g}s; "
+                                    "verified incumbent kept")
+            else:
+                result.update(status="ERROR",
+                              error="Time-limit incumbent is not a valid schedule")
+        else:
+            result.update(status="TIMEOUT",
+                          error=f"Gurobi exceeded {timeout_seconds:g} seconds")
     else:
         result.update(status="ERROR", error=f"Gurobi status {status}")
 

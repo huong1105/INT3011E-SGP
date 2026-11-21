@@ -13,7 +13,7 @@ param(
     [ValidateSet("tier1", "tier2", "tier3", "all")]
     [string]$Tier = "tier1",
 
-    [string]$Instances = "data/sgp_paper_instances.csv",
+    [string]$Instances = "benchmarks/benchmark_instances.csv",
     [string]$Output = "benchmarks/results.csv",
 
     [double]$TimeoutSmall = 120,
@@ -48,6 +48,7 @@ function Invoke-Run {
     Write-Host ("    python -m benchmarks.run_all {0}" -f ($Arguments -join " "))
     & python -m benchmarks.run_all @Arguments 2>&1 | Tee-Object -FilePath $log
     if ($LASTEXITCODE -ne 0) {
+        $script:failed = $true
         Write-Warning ("{0} kết thúc với exit code {1} (xem {2})" -f $Name, $LASTEXITCODE, $log)
     }
 }
@@ -73,6 +74,7 @@ function Show-Summary {
 }
 
 $common = @("--instances", $Instances, "--output", $Output, "--resume")
+$script:failed = $false
 
 if ($Tier -in @("tier1", "all")) {
     # 1a. SAT: một cấu hình đại diện, phủ toàn bộ instance
@@ -133,3 +135,4 @@ if ($Tier -in @("tier3", "all")) {
 Show-Summary
 Write-Host ""
 Write-Host "Log: $logDir" -ForegroundColor DarkGray
+if ($script:failed) { exit 1 }

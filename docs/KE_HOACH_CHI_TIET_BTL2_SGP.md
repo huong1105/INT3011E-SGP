@@ -202,7 +202,7 @@ ILP, triển khai symmetry breaking và benchmark chung thuộc các phần vi�
     2. `SB2`: Với tuần sau tuần đầu, gán người $i$ vào nhóm $i$ cho $1\le i\le\min(g,s)$, theo Eq. (12).
   - Thứ tự nhóm/tuần là các hướng mở rộng, không gán thành SB3/SB4 của bài nguồn. Với biểu diễn membership ba chỉ số, người trong nhóm vốn không có chỉ số vị trí. Mỗi mở rộng hoặc tổ hợp SB cần lập luận bảo toàn ít nhất một nghiệm trong mỗi lớp đối xứng và kiểm tra trên oracle nhỏ trước khi dùng.
 - **`benchmarks/run_all.py` (Benchmark Suite tự động):**
-  - Dùng `data/sgp_paper_instances.csv` chứa 66 instance tham khảo và các ca biên bổ sung; quy đổi đúng `(g,p,w)` sang `(w,g,s)`. Chọn phạm vi/tài nguyên thực nghiệm công khai, không mặc định một dải tham số nhỏ đã đại diện cho bài nguồn.
+  - Dùng `benchmarks/benchmark_instances.csv` chứa 66 instance tham khảo và các ca biên bổ sung; quy đổi đúng `(g,p,w)` sang `(w,g,s)`. Chọn phạm vi/tài nguyên thực nghiệm công khai, không mặc định một dải tham số nhỏ đã đại diện cho bài nguồn.
   - Với SAT Direct, đo 4 bộ mã hóa C2 (`nsc`, `seqcounter`, `totalizer`, `cardnetwrk`) $\times$ các SAT solver khả dụng $\times$ cấu hình SB; giữ C1 và C3 cố định. Chạy Order Encoding khi đã triển khai; chạy CP và ILP thành các cấu hình đối chứng riêng trên cùng bộ test và giới hạn thời gian.
   - Xuất dữ liệu sạch ra file `benchmarks/results.csv` cho TV1.
 
