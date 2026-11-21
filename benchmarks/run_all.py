@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from src.io_utils import parse_paper_instance
+from src.io_utils import configure_safe_stdio, parse_paper_instance
 from src.verifier import verify_schedule
 
 METHODS = ("sat", "order", "cp", "ilp")
@@ -166,6 +166,7 @@ def _load_done(path):
 
 def main(argv=None):
     """Chạy suite benchmark theo tham số CLI và ghi results.csv tăng dần."""
+    configure_safe_stdio()
     parser = argparse.ArgumentParser(description="SGP benchmark suite -> results.csv")
     parser.add_argument("--instances", default="data/sgp_paper_instances.csv")
     parser.add_argument("--output", default="benchmarks/results.csv")

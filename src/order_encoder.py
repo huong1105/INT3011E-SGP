@@ -9,20 +9,31 @@ import time
 
 from pysat.card import CardEnc, EncType
 
-from .io_utils import VALID_SB_MODES, check_partner_bound, configure_safe_stdio
+from .io_utils import check_partner_bound, configure_safe_stdio
 from .sat_runner import solve_cnf
 from .verifier import verify_schedule
+
+ORDER_SB_MODES = ("none", "sb1")
+
+def _check_sb(sb: str) -> None:
+    """Chỉ nhận none/sb1: SB2 không biểu diễn được trong mô hình theo vị trí."""
+    if sb not in ORDER_SB_MODES:
+        raise ValueError(
+            f"sb must be one of {ORDER_SB_MODES} for Order Encoding, got {sb!r}: "
+            "SB2 (full) cannot be expressed in the slot-based model; "
+            "use the SAT direct encoders for sb='full'"
+        )
 
 def encode_order_sgp(w: int, g: int, s: int, sb: str = "none"):
     """Sinh CNF Order Encoding, trả (clauses, num_vars, stats).
 
     Biến P_{k,j,c} in [1..n] được mã hóa bằng B_{k,j,c,v} <=> (P <= v), v in [1..n-1].
+    Chỉ hỗ trợ sb='none' hoặc 'sb1'.
     """
     for name, value in (("w", w), ("g", g), ("s", s)):
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"{name} must be a positive integer, got {value!r}")
-    if sb not in VALID_SB_MODES:
-        raise ValueError(f"sb must be one of {VALID_SB_MODES}, got {sb!r}")
+    _check_sb(sb)
 
     n = g * s
     n_thresholds = n - 1
@@ -146,12 +157,8 @@ def decode_order_model(model, w: int, g: int, s: int):
 def solve_sgp_order(w: int, g: int, s: int, solver: str = "cadical",
                     timeout_seconds: float | None = None, sb: str = "none"):
     """Sinh CNF Order Encoding, giải và kiểm chứng lịch."""
+    _check_sb(sb)
     started = time.perf_counter()
-
-    if sb == "full":
-        raise NotImplementedError(
-            "SB2 cannot be expressed in the slot-based Order Encoding; use --sb sb1"
-        )
 
     feasible_bound, w_max, unsat_reason = check_partner_bound(w, g, s)
     if not feasible_bound:
@@ -210,7 +217,8 @@ def main(argv=None):
     parser.add_argument("-g", type=int, required=True)
     parser.add_argument("-s", type=int, required=True)
     parser.add_argument("--solver", default="cadical", choices=("cadical", "glucose"))
-    parser.add_argument("--sb", default="none", choices=VALID_SB_MODES)
+    parser.add_argument("--sb", default="none", choices=ORDER_SB_MODES,
+                        help="symmetry breaking: none or sb1 (SB2 is SAT-direct only)")
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--zero-based", action="store_true")
     parser.add_argument("--json", action="store_true")
