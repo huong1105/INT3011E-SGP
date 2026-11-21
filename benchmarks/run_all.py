@@ -7,6 +7,8 @@ Quy ước CSV:
 - `timeout_seconds`/`timeout_scope`/`attempt`: khóa của `--resume`; chỉ `SAT`/`UNSAT`/
   `SKIPPED_RESOURCE_LIMIT` là trạng thái kết thúc, các trạng thái khác được thử lại.
 - Lượt CNF vượt `--max-clauses` bị ghi `SKIPPED_RESOURCE_LIMIT` trước khi dựng CNF.
+- `--run-budget` chạy mỗi lượt trong worker riêng và hard-cap toàn bộ thời gian kể từ
+  lúc bắt đầu dựng mô hình; khi đó `timeout_scope=total`, `timeout_seconds` là ngân sách.
 - Khi vẽ, mỗi khóa chỉ lấy dòng có `attempt` lớn nhất để tránh đếm lặp; so sánh
   hiệu năng dùng `total_time_seconds <= timeout_seconds` và loại dòng precheck.
 """
@@ -15,8 +17,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import os
+import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime
 from math import comb
 from pathlib import Path
@@ -33,6 +39,8 @@ CNF_METHODS = ("sat", "order")
 TERMINAL_STATUSES = ("SAT", "UNSAT", "SKIPPED_RESOURCE_LIMIT")
 DEFAULT_MAX_CLAUSES = 5_000_000
 TIMEOUT_SCOPE = "solver"
+WORKER_FLAG = "--_worker"
+STARTUP_ALLOWANCE = 15.0
 
 FIELDS = [
     "instance", "w", "g", "s", "n",
@@ -144,7 +152,7 @@ def run_case(instance, case, timeout_seconds):
     return solve_sgp_ilp(w, g, s, timeout_seconds=timeout_seconds, sb=sb)
 
 
-def build_row(instance, case, result, timeout_seconds, attempt):
+def build_row(instance, case, result, timeout_seconds, timeout_scope, attempt):
     """Chuẩn hóa kết quả solver thành một dòng CSV, kiểm chứng lại độc lập."""
     method, encoding, solver, sb = case
     w, g, s = instance["w"], instance["g"], instance["s"]
@@ -160,7 +168,7 @@ def build_row(instance, case, result, timeout_seconds, attempt):
         "instance": instance["label"], "w": w, "g": g, "s": s, "n": g * s,
         "method": method, "encoding": encoding,
         "solver": result.get("solver", solver), "sb": sb,
-        "timeout_seconds": timeout_seconds, "timeout_scope": TIMEOUT_SCOPE,
+        "timeout_seconds": timeout_seconds, "timeout_scope": timeout_scope,
         "attempt": attempt,
         "status": status, "verified": verified,
         "backend_type": "precheck" if precheck else "",
@@ -182,6 +190,148 @@ def build_row(instance, case, result, timeout_seconds, attempt):
 def _format(value):
     """Chuyển None thành chuỗi rỗng để CSV sạch."""
     return "" if value is None else value
+
+
+def _schedule_to_lists(schedule, w, g):
+    """Chuyển schedule[week][group] sang list lồng để ghi JSON."""
+    return [[list(schedule[k][j]) for j in range(g)] for k in range(w)]
+
+
+def _schedule_from_lists(data, w, g):
+    """Dựng lại schedule[week][group] từ list lồng."""
+    return {k: {j: list(data[k][j]) for j in range(g)} for k in range(w)}
+
+
+def _kill_tree(proc):
+    """Kết thúc worker cùng tiến trình con (solver) của nó."""
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=15)
+        except Exception:
+            pass
+    if proc.poll() is None:
+        proc.kill()
+
+
+def _drain(proc, timeout=5):
+    """Đọc nốt stdout/stderr sau khi kill, không treo nếu cháu còn giữ pipe."""
+    try:
+        return proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            return proc.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            return None, None
+
+
+def _run_case_isolated(instance, case, timeout_seconds, run_budget, work_dir,
+                       startup_allowance):
+    """Chạy một lượt trong worker riêng, hard-cap tính từ lúc bắt đầu dựng mô hình."""
+    token = uuid.uuid4().hex
+    spec_path = work_dir / f".spec-{token}.json"
+    out_path = work_dir / f".out-{token}.json"
+    start_path = work_dir / f".start-{token}.txt"
+    spec = {
+        "label": instance["label"], "w": instance["w"], "g": instance["g"],
+        "s": instance["s"], "expected_status": instance["expected_status"],
+        "method": case[0], "encoding": case[1], "solver": case[2], "sb": case[3],
+        "timeout_seconds": timeout_seconds, "start_path": str(start_path),
+    }
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "benchmarks.run_all", WORKER_FLAG,
+             str(spec_path), str(out_path)],
+            cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        wait_until = time.time() + startup_allowance
+        while time.time() < wait_until and not start_path.exists():
+            if proc.poll() is not None:
+                break
+            time.sleep(0.005)
+        if not start_path.exists():
+            _kill_tree(proc)
+            _, stderr = _drain(proc)
+            detail = (stderr or "").strip()[-1000:]
+            return {"status": "ERROR", "error": f"worker did not start: {detail}"}
+
+        started_at = float(start_path.read_text(encoding="utf-8").strip())
+        remaining = run_budget - (time.time() - started_at)
+        if remaining <= 0:
+            _kill_tree(proc)
+            _drain(proc)
+            return {
+                "status": "TIMEOUT",
+                "error": (f"whole-run budget {run_budget:g}s exhausted before "
+                          "the model was built"),
+                "total_time_seconds": time.time() - started_at,
+            }
+        try:
+            _, stderr = proc.communicate(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            _, stderr = _drain(proc)
+            return {
+                "status": "TIMEOUT",
+                "error": f"whole-run budget {run_budget:g}s exceeded (build included)",
+                "total_time_seconds": time.time() - started_at,
+            }
+
+        if proc.returncode != 0 or not out_path.exists():
+            detail = (stderr or "").strip()[-1000:]
+            return {"status": "ERROR",
+                    "error": f"worker exited with code {proc.returncode}: {detail}"}
+        result = json.loads(out_path.read_text(encoding="utf-8"))
+        if isinstance(result.get("schedule"), list):
+            result["schedule"] = _schedule_from_lists(
+                result["schedule"], instance["w"], instance["g"])
+        return result
+    finally:
+        for path in (spec_path, out_path, start_path):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _worker_main(spec_path, out_path):
+    """Worker chạy một lượt benchmark và ghi kết quả JSON."""
+    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+    instance = {
+        "label": spec["label"], "w": spec["w"], "g": spec["g"], "s": spec["s"],
+        "expected_status": spec.get("expected_status", ""),
+    }
+    case = (spec["method"], spec["encoding"], spec["solver"], spec["sb"])
+
+    # Nạp sẵn module solver trước khi mở đồng hồ để import không tính vào ngân sách.
+    if case[0] == "sat":
+        from src.sat_runner import solve_cnf  # noqa: F401
+    elif case[0] == "order":
+        from src.order_encoder import solve_sgp_order  # noqa: F401
+    elif case[0] == "cp":
+        from src.cp_solver import solve_sgp_cp  # noqa: F401
+    else:
+        from src.ilp_solver import solve_sgp_ilp  # noqa: F401
+
+    start_path = spec.get("start_path")
+    if start_path:
+        Path(start_path).write_text(str(time.time()), encoding="utf-8")
+    try:
+        result = run_case(instance, case, spec["timeout_seconds"])
+    except NotImplementedError as exc:
+        result = {"status": "UNAVAILABLE", "error": str(exc)}
+    except Exception as exc:
+        result = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    result.pop("model", None)
+    if result.get("schedule"):
+        result["schedule"] = _schedule_to_lists(result["schedule"], spec["w"], spec["g"])
+    Path(out_path).write_text(
+        json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
+    return 0
 
 
 def _load_done(path):
@@ -217,6 +367,11 @@ def main(argv=None):
     parser.add_argument("--sb", default="none")
     parser.add_argument("--timeout", type=float, default=60.0,
                         help="giới hạn cho tiến trình solver (không gồm dựng CNF)")
+    parser.add_argument("--run-budget", type=float, default=0.0,
+                        help="giới hạn toàn lượt, tính từ lúc bắt đầu dựng mô hình; "
+                             "khi bật, --timeout được thay bằng ngân sách này (0 = tắt)")
+    parser.add_argument("--startup-allowance", type=float, default=STARTUP_ALLOWANCE,
+                        help="thời gian chờ worker khởi động trước khi áp ngân sách")
     parser.add_argument("--max-clauses", type=int, default=DEFAULT_MAX_CLAUSES,
                         help="chặn trước khi dựng CNF nếu C3 ước lượng vượt ngưỡng (0 = tắt)")
     parser.add_argument("--limit", type=int, default=None,
@@ -248,6 +403,9 @@ def main(argv=None):
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    run_budget = max(0.0, args.run_budget)
+    timeout_scope = "total" if run_budget > 0 else TIMEOUT_SCOPE
+    case_timeout = run_budget if run_budget > 0 else args.timeout
     done = _load_done(output) if args.resume else {}
     mode = "a" if args.resume and output.exists() else "w"
     start_all = time.perf_counter()
@@ -266,7 +424,7 @@ def main(argv=None):
         for index, instance in enumerate(instances, start=1):
             for case in cases:
                 key = ((instance["label"],) + case
-                       + (f"{args.timeout:g}", TIMEOUT_SCOPE))
+                       + (f"{case_timeout:g}", timeout_scope))
                 previous = done.get(key)
                 if previous is not None and previous[0] in TERMINAL_STATUSES:
                     continue
@@ -287,13 +445,19 @@ def main(argv=None):
                     }
                 else:
                     try:
-                        result = run_case(instance, case, args.timeout)
+                        if run_budget > 0:
+                            result = _run_case_isolated(
+                                instance, case, case_timeout, run_budget,
+                                output.parent, args.startup_allowance)
+                        else:
+                            result = run_case(instance, case, case_timeout)
                     except NotImplementedError as exc:
                         result = {"status": "UNAVAILABLE", "error": str(exc)}
                     except Exception as exc:
                         result = {"status": "ERROR",
                                   "error": f"{type(exc).__name__}: {exc}"}
-                row = build_row(instance, case, result, f"{args.timeout:g}", attempt)
+                row = build_row(instance, case, result, f"{case_timeout:g}",
+                                timeout_scope, attempt)
                 writer.writerow({field: _format(row[field]) for field in FIELDS})
                 handle.flush()
                 written += 1
@@ -325,4 +489,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 4 and sys.argv[1] == WORKER_FLAG:
+        raise SystemExit(_worker_main(sys.argv[2], sys.argv[3]))
     raise SystemExit(main())
