@@ -54,3 +54,6 @@ output/
 
 # Keep the shared work plan in Markdown.
 /docs/KE_HOACH_CHI_TIET_BTL2_SGP.pdf
+
+# Benchmark run logs
+benchmarks/logs/
