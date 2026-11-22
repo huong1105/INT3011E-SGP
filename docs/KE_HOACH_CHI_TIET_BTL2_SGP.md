@@ -260,3 +260,9 @@ Ví dụ minh họa cách ghi, các thời gian bên dưới là số ví dụ:
 **Quy tắc ghi và vẽ.** Nếu chưa dựng/giải như ở `UNSAT_PRECHECK`, để trống số đo và kích thước tương ứng. `0` chỉ khi đo hoặc đếm được bằng 0. `num_clauses` và `num_constraints` là hai loại số đếm riêng. Khi dùng cùng một cấu hình chạy, khóa mỗi dòng theo `(instance, method, encoding, solver)`. Nếu thử lại, chỉ lấy một kết quả theo quy tắc của đợt đo. TV1 dùng `total_time_seconds` với cùng tập bài và cutoff để so sánh. Tách precheck khỏi số bài solver giải được.
 
 **Trước đợt đo lại.** TV3 cập nhật bộ ghi, TV1 cập nhật bộ đọc biểu đồ, TV2 kiểm tra nhánh SAT và số mệnh đề/biến. Chạy trước `2-2-3` (SAT), `2-3-2` (UNSAT do solver), `2-2-4` (UNSAT do cận) và một ca timeout để kiểm tra trạng thái, ô trống và cách đếm. Các lượt chính bắt đầu bằng file mới đúng header trên.
+
+Benchmark so sánh mặc định dùng SB `none`, một luồng và giới hạn 60 giây từ lúc trước dựng đến khi kiểm chứng xong. Worker nạp thư viện và khởi tạo giấy phép Gurobi trước khi tính giờ. Các lượt đặt riêng `--timeout` dùng giới hạn của từng backend và phục vụ khảo sát.
+
+Nhóm cử một thành viên chạy `benchmarks.run_all` và chia sẻ một file `results.csv` cho cả nhóm. Người chạy giữ `results.csv.meta.json` cạnh CSV trên máy để `--resume` kiểm tra SB, số luồng và giới hạn thời gian. Dùng file đầu ra mới khi đổi các thiết lập này hoặc khi CSV cũ chưa có metadata. Ca thử lại trong cùng cấu hình thay đúng dòng cũ.
+
+Khi chỉ nhận `results.csv` của đợt đo mặc định, dùng `--cutoff 60` để vẽ biểu đồ. Đường thời gian C2 tính trung bình trên những bài cùng được các encoder giải trong cutoff cho từng kích thước. Cactus so sánh SAT, CP và ILP trên những bài cả ba phương pháp đều đã thử.

@@ -69,3 +69,25 @@ Nếu chỉ cần CNF, dùng `encode_sgp(w, g, s, encoding=...)` trong
 `src.sat_direct_encoders`; hàm trả `(clauses, num_vars, stats)`.
 Nếu đã có CNF, gọi `solve_cnf(clauses, solver=..., timeout_seconds=...)`
 trong `src.sat_runner`.
+
+## Benchmark so sánh
+
+Cài các dependency trong `requirements.txt` và dùng giấy phép Gurobi đã cấu hình
+để chạy đủ bốn phương pháp. Một thành viên chạy lệnh sau từ thư mục gốc:
+
+```powershell
+python -m benchmarks.run_all --output benchmarks/results.csv --resume
+```
+
+Lượt đo mặc định dùng cùng bộ bài được bật, SB `none`, một luồng và giới hạn
+60 giây từ dựng mô hình đến kiểm chứng. Worker nạp thư viện và khởi tạo Gurobi
+trước khi tính giờ. Người chạy giữ `results.csv.meta.json` cạnh CSV để tiếp tục
+bằng `--resume`. Nếu đổi cấu hình hoặc CSV cũ thiếu metadata, dùng đường dẫn
+đầu ra mới.
+
+Sau khi chạy xong, nhóm dùng chung một file `results.csv` để làm bảng và vẽ biểu
+đồ. Khi chỉ nhận CSV của đợt đo mặc định, chạy:
+
+```powershell
+python -m benchmarks.plot_cns --input benchmarks/results.csv --cutoff 60
+```

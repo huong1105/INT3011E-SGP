@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from typing import Any
 
 from src.cp_solver import solve_sgp_cp
 from src.display import print_result
 from src.io_utils import (
     api_to_paper,
+    check_partner_bound,
     configure_safe_stdio,
     export_dimacs,
     parse_args,
     safe_print,
     write_csv_v1_row,
 )
-from src.sat_direct_encoders import encode_sgp
 from src.sat_runner import solve_sgp
 from src.verifier import verify_schedule
 
@@ -46,17 +47,12 @@ def _load_symmetry_clauses(
 
 
 def _run_sat(args: Any) -> dict[str, Any]:
-    """Chạy solver SAT và kiểm chứng nghiệm."""
+    """Chạy SAT và xuất CNF theo yêu cầu."""
+    setup_started = time.perf_counter()
     sb_clauses = _load_symmetry_clauses(args.weeks, args.groups, args.size, args.sb)
+    setup_time = time.perf_counter() - setup_started
 
-    if args.export_cnf:
-        clauses, num_vars, _ = encode_sgp(
-            args.weeks,
-            args.groups,
-            args.size,
-            encoding=args.amo,
-            symmetry_clauses=sb_clauses,
-        )
+    def export_cnf(clauses: list[list[int]], num_vars: int) -> None:
         pg, pp, pw = api_to_paper(args.weeks, args.groups, args.size)
         out_path = export_dimacs(
             clauses,
@@ -79,20 +75,10 @@ def _run_sat(args: Any) -> dict[str, Any]:
         solver=args.solver,
         timeout_seconds=args.timeout,
         symmetry_clauses=sb_clauses,
+        on_encoded=export_cnf if args.export_cnf else None,
     )
-    result["method"] = "sat"
-    result["sb"] = args.sb
-
-    if result.get("status") == "SAT" and result.get("schedule") is not None:
-        valid, errors = verify_schedule(
-            result["schedule"], args.weeks, args.groups, args.size
-        )
-        result["verified"] = valid
-        result["verification_errors"] = errors
-        if not valid:
-            result["status"] = "ERROR"
-            result["error"] = "Universal Verifier rejected SAT schedule"
-
+    result.update(method="sat", sb=args.sb)
+    result["total_time_seconds"] += setup_time
     return result
 
 
@@ -104,7 +90,7 @@ def _run_cp(args: Any) -> dict[str, Any]:
         args.size,
         timeout_seconds=args.timeout,
         sb=args.sb,
-        num_workers=args.workers,
+        num_workers=(args.workers or 1) if args.csv else args.workers,
     )
 
 
@@ -117,7 +103,7 @@ def _run_order(args: Any) -> dict[str, Any]:
         raise NotImplementedError(
             "Method --method order requires src/order_encoder.py, which is not yet implemented."
         )
-    result = solver_fn(
+    return solver_fn(
         args.weeks,
         args.groups,
         args.size,
@@ -125,16 +111,6 @@ def _run_order(args: Any) -> dict[str, Any]:
         timeout_seconds=args.timeout,
         sb=args.sb,
     )
-    if result.get("status") == "SAT" and result.get("schedule") is not None:
-        valid, errors = verify_schedule(
-            result["schedule"], args.weeks, args.groups, args.size
-        )
-        result["verified"] = valid
-        result["verification_errors"] = errors
-        if not valid:
-            result["status"] = "ERROR"
-            result["error"] = "Universal Verifier rejected Order Encoding schedule"
-    return result
 
 
 def _run_ilp(args: Any) -> dict[str, Any]:
@@ -146,23 +122,14 @@ def _run_ilp(args: Any) -> dict[str, Any]:
         raise NotImplementedError(
             "Method --method ilp requires src/ilp_solver.py, which is not yet implemented."
         )
-    result = solver_fn(
-        args.weeks,
-        args.groups,
-        args.size,
-        timeout_seconds=args.timeout,
-        sb=args.sb,
+    w, g, s = args.weeks, args.groups, args.size
+    if args.csv and check_partner_bound(w, g, s)[0]:
+        failure = ilp_solver.prepare_gurobi()
+        if failure is not None:
+            return dict(failure, method="ilp", w=w, g=g, s=s, n=g * s, sb=args.sb)
+    return solver_fn(
+        w, g, s, timeout_seconds=args.timeout, sb=args.sb, num_threads=1 if args.csv else None
     )
-    if result.get("status") == "SAT" and result.get("schedule") is not None:
-        valid, errors = verify_schedule(
-            result["schedule"], args.weeks, args.groups, args.size
-        )
-        result["verified"] = valid
-        result["verification_errors"] = errors
-        if not valid:
-            result["status"] = "ERROR"
-            result["error"] = "Universal Verifier rejected ILP schedule"
-    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -186,10 +153,31 @@ def main(argv: list[str] | None = None) -> int:
         safe_print(f"[Error] {exc}", stream=sys.stderr)
         return 1
 
+    result.setdefault("solver", args.solver)
+    if result.get("status") == "SAT":
+        verification_started = time.perf_counter()
+        valid, errors = verify_schedule(
+            result.get("schedule"), args.weeks, args.groups, args.size
+        )
+        result.update(verified=valid, verification_errors=errors)
+        if not valid:
+            result.update(status="ERROR", error="Universal Verifier rejected the schedule")
+        result["total_time_seconds"] += time.perf_counter() - verification_started
+
     if args.csv:
-        csv_path = write_csv_v1_row(result, args.csv)
+        config = {
+            "sb": args.sb,
+            "timeout_seconds": args.timeout,
+            "timeout_scope": "solver",
+            "num_threads": args.workers or 1,
+        }
+        try:
+            csv_path = write_csv_v1_row(result, args.csv, config=config)
+        except (OSError, ValueError) as exc:
+            safe_print(f"[Error] Could not write CSV {args.csv}: {exc}", stream=sys.stderr)
+            return 1
         if not args.json:
-            safe_print(f"Appended CSV v1 row to: {csv_path}")
+            safe_print(f"Saved CSV v1 row to: {csv_path}")
 
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=True))

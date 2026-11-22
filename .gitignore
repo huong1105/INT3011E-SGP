@@ -39,6 +39,8 @@ ENV/
 # Output files
 *.cnf
 benchmarks/results.csv
+benchmarks/results.csv.meta.json
+benchmarks/results.csv.lock
 temp*
 output/
 

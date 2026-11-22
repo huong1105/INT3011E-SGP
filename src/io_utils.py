@@ -1,13 +1,17 @@
-"""Xử lý CLI, cận đối tác và xuất DIMACS CNF."""
+"""Xử lý CLI, cận đối tác, DIMACS và CSV."""
 
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import csv
+import json
 import math
+import os
 from pathlib import Path
 import sys
-from typing import Any, Iterable, Sequence
+import tempfile
+from typing import Any, Iterable, Iterator, Mapping, Sequence, TextIO
 
 VALID_METHODS = ("sat", "order", "cp", "ilp")
 VALID_C2_ENCODINGS = ("nsc", "seqcounter", "totalizer", "cardnetwrk")
@@ -36,6 +40,7 @@ BENCHMARK_CSV_V1_FIELDS = (
     "num_constraints",
     "error",
 )
+CSV_V1_KEY_FIELDS = ("instance", "method", "encoding", "solver")
 
 
 def _validate_positive_int(name: str, value: int) -> None:
@@ -220,6 +225,13 @@ def result_to_csv_v1_row(result: dict[str, Any]) -> dict[str, Any]:
         else str(result.get("status") or "ERROR").strip().upper()
     )
     error = " ".join(str(result.get("error") or "").split())
+    if status == "SAT" and result.get("verified") is not True:
+        status = "ERROR"
+        error = error or "SAT schedule was not verified"
+    if status in ("SAT", "UNSAT", "UNSAT_PRECHECK"):
+        error = ""
+    elif status == "TIMEOUT" and not error:
+        error = "Time limit exceeded"
 
     if status in ("UNSAT_PRECHECK", "SKIPPED_RESOURCE_LIMIT"):
         encode_time: Any = ""
@@ -258,23 +270,131 @@ def result_to_csv_v1_row(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def read_csv_v1_rows(handle: TextIO) -> Iterator[dict[str, str]]:
+    """Đọc và kiểm tra các dòng CSV v1."""
+    if handle.read(1) != "\ufeff":
+        handle.seek(0)
+    reader = csv.DictReader(handle, strict=True)
+    try:
+        header = tuple(reader.fieldnames or ())
+    except csv.Error as exc:
+        raise ValueError(f"Invalid CSV v1 header: {exc}") from exc
+    if header != BENCHMARK_CSV_V1_FIELDS:
+        raise ValueError(
+            "CSV header does not match benchmark v1. "
+            f"Use a new file or provide this header: {','.join(BENCHMARK_CSV_V1_FIELDS)}"
+        )
+    try:
+        for row in reader:
+            if None in row or None in row.values():
+                raise ValueError(f"Wrong number of benchmark CSV columns on line {reader.line_num}")
+            yield row
+    except csv.Error as exc:
+        raise ValueError(f"Invalid benchmark CSV on line {reader.line_num}: {exc}") from exc
+
+
+@contextmanager
+def benchmark_csv_lock(path: str | Path) -> Iterator[None]:
+    """Khóa file kết quả cho phiên ghi."""
+    target = Path(path).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock = target.with_name(f"{target.name}.lock")
+    with lock.open("a+b") as handle:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise OSError(f"Could not lock {target}; another writer may be using it") from exc
+        yield
+
+
+def load_benchmark_csv_rows(path: str | Path) -> dict[tuple[str, ...], dict[str, str]]:
+    """Đọc kết quả CSV v1 theo khóa từng ca."""
+    target = Path(path)
+    rows = {}
+    if not target.exists() or target.stat().st_size == 0:
+        return rows
+    with target.open(encoding="utf-8", newline="") as handle:
+        for row in read_csv_v1_rows(handle):
+            key = tuple(row[field] for field in CSV_V1_KEY_FIELDS)
+            if key in rows:
+                raise ValueError(f"Duplicate benchmark case {key}")
+            rows[key] = row
+    return rows
+
+
+@contextmanager
+def _atomic_text_file(target: Path) -> Iterator[TextIO]:
+    """Ghi file bằng cách thay thế nguyên tử."""
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="", dir=target.parent,
+        prefix=f".{target.name}-", suffix=".tmp", delete=False,
+    )
+    pending = Path(handle.name)
+    try:
+        with handle:
+            yield handle
+            handle.flush()
+            os.fsync(handle.fileno())
+        pending.replace(target)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def save_benchmark_csv_rows(
+    path: str | Path, rows: Mapping[tuple[str, ...], Mapping[str, Any]],
+) -> None:
+    """Lưu bảng kết quả CSV v1."""
+    with _atomic_text_file(Path(path)) as handle:
+        writer = csv.DictWriter(handle, fieldnames=BENCHMARK_CSV_V1_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows.values())
+
+
+def set_benchmark_csv_config(
+    path: str | Path, config: Mapping[str, Any], *, resume: bool,
+) -> None:
+    """Lưu hoặc kiểm tra cấu hình benchmark."""
+    target = Path(path)
+    metadata = target.with_name(f"{target.name}.meta.json")
+    if resume:
+        if not metadata.is_file() or json.loads(metadata.read_text(encoding="utf-8")) != config:
+            raise ValueError("Missing or different benchmark settings in the companion .meta.json; "
+                             "use a new CSV file for this benchmark")
+        return
+
+    with _atomic_text_file(metadata) as handle:
+        json.dump(dict(config), handle, indent=2)
+        handle.write("\n")
+
+
 def write_csv_v1_row(
     result: dict[str, Any],
     filepath: str | Path,
     append: bool = True,
+    *,
+    config: Mapping[str, Any],
 ) -> Path:
-    """Ghi một dòng kết quả theo chuẩn CSV benchmark v1."""
-    target = Path(filepath)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    mode = "a" if append and target.exists() else "w"
-    needs_header = (mode == "w") or (target.stat().st_size == 0)
+    """Ghi hoặc thay dòng kết quả CSV v1."""
+    path = Path(filepath)
+    target = path.resolve()
     row = result_to_csv_v1_row(result)
-    with target.open(mode, encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(BENCHMARK_CSV_V1_FIELDS))
-        if needs_header:
-            writer.writeheader()
-        writer.writerow(row)
-    return target
+    key = tuple(row[field] for field in CSV_V1_KEY_FIELDS)
+    with benchmark_csv_lock(target):
+        rows = load_benchmark_csv_rows(target) if append else {}
+        if not append and target.exists():
+            save_benchmark_csv_rows(target, rows)
+        set_benchmark_csv_config(target, config, resume=bool(rows))
+        rows[key] = row
+        save_benchmark_csv_rows(target, rows)
+    return path
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -297,7 +417,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--amo",
         "--encoding",
         dest="amo",
-        default="nsc",
+        default=None,
         choices=VALID_C2_ENCODINGS,
         help="C2 Exactly-s encoding (default: nsc)",
     )
@@ -335,7 +455,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--csv",
         type=str,
         default=None,
-        help="output path to append benchmark CSV v1 row",
+        help="output path for a benchmark CSV v1 row",
     )
     parser.add_argument(
         "--zero-based",
@@ -370,6 +490,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     if args.workers is not None and args.workers < 1:
         parser.error("--workers must be a positive integer")
 
+    if args.method != "sat" and args.amo is not None:
+        parser.error("--amo/--encoding is only available with --method sat")
+    if args.method != "sat" and args.export_cnf is not None:
+        parser.error("--export-cnf is only available with --method sat")
+    if args.method != "cp" and args.workers is not None:
+        parser.error("--workers is only available with --method cp")
+    if args.method == "order" and args.sb == "full":
+        parser.error("--method order only supports --sb none or sb1")
+    if args.csv and args.export_cnf and Path(args.csv).resolve() == Path(args.export_cnf).resolve():
+        parser.error("--csv and --export-cnf must use different output files")
+
+    args.amo = args.amo or "nsc"
     if args.solver is None:
         args.solver = DEFAULT_SOLVER_BY_METHOD[args.method]
     else:

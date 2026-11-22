@@ -344,10 +344,11 @@ def main(argv: list[str] | None = None) -> int:
         "--csv",
         type=str,
         default=None,
-        help="output path to append benchmark CSV v1 row",
+        help="output path for a benchmark CSV v1 row",
     )
     args = parser.parse_args(argv)
 
+    workers = 1 if args.csv and args.workers is None else args.workers
     try:
         result = solve_sgp_cp(
             args.w,
@@ -355,15 +356,28 @@ def main(argv: list[str] | None = None) -> int:
             args.s,
             timeout_seconds=args.timeout,
             sb=args.sb,
-            num_workers=args.workers,
+            num_workers=workers,
         )
     except ValueError as exc:
         parser.error(str(exc))
 
     if args.csv:
-        csv_path = write_csv_v1_row(result, args.csv)
+        try:
+            csv_path = write_csv_v1_row(
+                result,
+                args.csv,
+                config={
+                    "sb": args.sb,
+                    "timeout_seconds": args.timeout,
+                    "timeout_scope": "solver",
+                    "num_threads": workers,
+                },
+            )
+        except (OSError, ValueError) as exc:
+            safe_print(f"[Error] Could not write CSV {args.csv}: {exc}", stream=sys.stderr)
+            return 1
         if not args.json:
-            safe_print(f"Appended CSV v1 row to: {csv_path}")
+            safe_print(f"Saved benchmark CSV v1 row to: {csv_path}")
 
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=True))

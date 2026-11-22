@@ -1,17 +1,4 @@
-"""Chạy benchmark SGP trên bốn phương pháp và xuất results.csv cho CNSPlots.
-
-Quy ước CSV:
-- `backend_type=precheck`: lượt kết luận bằng cận đối tác, `solver_wall_time_seconds`
-  để trống cho cả bốn phương pháp và không đưa vào biểu đồ so sánh solver.
-- `solver_status`: trạng thái backend (ví dụ `TIME_LIMIT` của Gurobi) tách khỏi `status`.
-- `--resume` yêu cầu CSV có đúng tiêu đề cột và giữ kết quả `SAT`/`UNSAT` đã có.
-  Lượt `SKIPPED_RESOURCE_LIMIT` được thử lại nếu ngưỡng hiện tại cho phép.
-- Lượt CNF vượt `--max-clauses` bị ghi `SKIPPED_RESOURCE_LIMIT` trước khi dựng CNF.
-- `--run-budget` chạy mỗi lượt trong worker riêng và hard-cap toàn bộ thời gian kể từ
-  lúc bắt đầu dựng mô hình; khi đó `timeout_scope=total`, `timeout_seconds` là ngân sách.
-- Khi vẽ, mỗi khóa chỉ lấy dòng có `attempt` lớn nhất để tránh đếm lặp; so sánh
-  hiệu năng dùng `total_time_seconds <= timeout_seconds` và loại dòng precheck.
-"""
+"""Chạy benchmark SGP và xuất CSV v1."""
 
 from __future__ import annotations
 
@@ -19,15 +6,24 @@ import argparse
 import csv
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime
-from math import comb
+from math import comb, isfinite
 from pathlib import Path
 
-from src.io_utils import configure_safe_stdio, parse_paper_instance
+from src.io_utils import (
+    benchmark_csv_lock,
+    check_partner_bound,
+    configure_safe_stdio,
+    load_benchmark_csv_rows,
+    parse_paper_instance,
+    result_to_csv_v1_row,
+    save_benchmark_csv_rows,
+    set_benchmark_csv_config,
+)
 from src.verifier import verify_schedule
 
 METHODS = ("sat", "order", "cp", "ilp")
@@ -36,23 +32,11 @@ SAT_SOLVERS = ("cadical", "glucose")
 SB_MODES = ("none", "sb1", "full")
 
 CNF_METHODS = ("sat", "order")
-TERMINAL_STATUSES = ("SAT", "UNSAT")
+TERMINAL_STATUSES = ("SAT", "UNSAT", "UNSAT_PRECHECK")
 DEFAULT_MAX_CLAUSES = 5_000_000
-TIMEOUT_SCOPE = "solver"
+DEFAULT_RUN_BUDGET = 60.0
 WORKER_FLAG = "--_worker"
 STARTUP_ALLOWANCE = 15.0
-
-FIELDS = [
-    "instance", "w", "g", "s", "n",
-    "method", "encoding", "solver", "sb",
-    "timeout_seconds", "timeout_scope", "attempt",
-    "status", "verified", "backend_type", "solver_status",
-    "solver_wall_time_seconds", "encode_time_seconds",
-    "total_time_seconds", "cpu_time_seconds",
-    "num_vars", "num_clauses", "conflicts",
-    "expected_status", "error", "timestamp",
-]
-
 
 def estimate_cnf_clauses(w, g, s):
     """Ước lượng cận dưới số clause CNF; C3 chiếm phần lớn ở instance lớn."""
@@ -68,33 +52,42 @@ def _split(value, allowed, flag):
             raise SystemExit(f"{flag}: invalid value {item!r}; choose from {allowed}")
     if not items:
         raise SystemExit(f"{flag}: at least one value required")
-    return items
+    return tuple(dict.fromkeys(items))
 
 
 def load_instances(path):
     """Đọc CSV instance (label|paper_label,w,g,s,expected_status,enabled,note), bỏ dòng enabled=0."""
     rows = []
     skipped = 0
+    seen = set()
     with Path(path).open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
+        reader = csv.DictReader(handle, strict=True)
         fieldnames = reader.fieldnames or []
         if "label" not in fieldnames and "paper_label" not in fieldnames:
             raise ValueError(f"{path}: missing 'label' or 'paper_label' column")
         for raw in reader:
+            if None in raw or None in raw.values():
+                raise ValueError(f"{path}:{reader.line_num}: incorrect input column count")
             label = (raw.get("label") or raw.get("paper_label") or "").strip()
             if not label:
                 continue
             if (raw.get("enabled") or "1").strip().lower() in ("0", "false", "no"):
                 skipped += 1
                 continue
-            w, g, s = raw.get("w"), raw.get("g"), raw.get("s")
-            if w and g and s:
-                w, g, s = int(w), int(g), int(s)
-            else:
-                w, g, s = parse_paper_instance(label)
+            w, g, s = parse_paper_instance(label)
+            dimensions = tuple((raw.get(field) or "").strip() for field in ("w", "g", "s"))
+            if any(dimensions) and (not all(dimensions) or tuple(map(int, dimensions)) != (w, g, s)):
+                raise ValueError(f"{path}:{reader.line_num}: dimensions do not match {label!r}")
+            label = f"{g}-{s}-{w}"
+            if label in seen:
+                raise ValueError(f"{path}:{reader.line_num}: duplicate instance {label}")
+            seen.add(label)
+            expected = (raw.get("expected_status") or raw.get("source_status") or "").strip().upper()
+            if expected not in ("", "UNKNOWN", "SAT", "UNSAT"):
+                raise ValueError(f"{path}:{reader.line_num}: invalid expected status {expected!r}")
             rows.append({
                 "label": label, "w": w, "g": g, "s": s,
-                "expected_status": (raw.get("expected_status") or "").strip().upper(),
+                "expected_status": expected,
             })
     if not rows:
         raise ValueError(f"{path}: no instances")
@@ -125,7 +118,7 @@ def build_cases(methods, encodings, solvers, sb_modes):
     return cases
 
 
-def run_case(instance, case, timeout_seconds):
+def run_case(instance, case, timeout_seconds, num_threads=None):
     """Chạy một cấu hình và trả kết quả thô của solver tương ứng."""
     method, encoding, solver, sb = case
     w, g, s = instance["w"], instance["g"], instance["s"]
@@ -145,61 +138,59 @@ def run_case(instance, case, timeout_seconds):
     if method == "cp":
         from src.cp_solver import solve_sgp_cp
 
-        return solve_sgp_cp(w, g, s, timeout_seconds=timeout_seconds, sb=sb)
+        return solve_sgp_cp(w, g, s, timeout_seconds=timeout_seconds, sb=sb, num_workers=num_threads)
 
     from src.ilp_solver import solve_sgp_ilp
 
-    return solve_sgp_ilp(w, g, s, timeout_seconds=timeout_seconds, sb=sb)
+    return solve_sgp_ilp(w, g, s, timeout_seconds=timeout_seconds, sb=sb, num_threads=num_threads)
 
 
-def build_row(instance, case, result, timeout_seconds, timeout_scope, attempt):
-    """Chuẩn hóa kết quả solver thành một dòng CSV, kiểm chứng lại độc lập."""
-    method, encoding, solver, sb = case
+def _prepare_case(method):
+    """Chuẩn bị solver trước khi đo."""
+    try:
+        if method == "sat":
+            from src import sat_direct_encoders, sat_runner, symmetry  # noqa: F401
+        elif method == "order":
+            from src import order_encoder  # noqa: F401
+        elif method == "cp":
+            from src import cp_solver  # noqa: F401
+        else:
+            from src.ilp_solver import prepare_gurobi
+
+            return prepare_gurobi()
+    except ImportError as exc:
+        return {"status": "UNAVAILABLE", "error": str(exc)}
+    return None
+
+
+def _execute_case(instance, case, timeout_seconds, num_threads, started):
+    """Chạy và đo một ca có kiểm chứng lịch."""
+    try:
+        result = run_case(instance, case, timeout_seconds, num_threads)
+    except (ImportError, NotImplementedError) as exc:
+        result = {"status": "UNAVAILABLE", "error": str(exc)}
+    except Exception as exc:
+        result = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+
+    if result.get("status") == "SAT":
+        valid, _ = verify_schedule(
+            result.get("schedule"), instance["w"], instance["g"], instance["s"]
+        )
+        if not (result.get("verified") and valid):
+            result.update(
+                status="ERROR", verified=False, error="Benchmark schedule verification failed"
+            )
+    result["total_time_seconds"] = time.perf_counter() - started
+    return result
+
+
+def build_row(instance, case, result):
+    """Chuẩn hóa kết quả thành một dòng CSV v1."""
+    method, encoding, solver, _ = case
     w, g, s = instance["w"], instance["g"], instance["s"]
-    status = result.get("status", "ERROR")
-    verified = bool(result.get("verified"))
-    schedule = result.get("schedule")
-    if status == "SAT" and schedule:
-        independent, _ = verify_schedule(schedule, w, g, s)
-        verified = verified and independent
-    precheck = result.get("backend_type") == "precheck"
-    solver_wall = None if precheck else result.get("solver_wall_time_seconds")
-    return {
-        "instance": instance["label"], "w": w, "g": g, "s": s, "n": g * s,
-        "method": method, "encoding": encoding,
-        "solver": result.get("solver", solver), "sb": sb,
-        "timeout_seconds": timeout_seconds, "timeout_scope": timeout_scope,
-        "attempt": attempt,
-        "status": status, "verified": verified,
-        "backend_type": "precheck" if precheck else "",
-        "solver_status": result.get("solver_status") or "",
-        "solver_wall_time_seconds": solver_wall,
-        "encode_time_seconds": result.get("encode_time_seconds",
-                                          result.get("model_build_time_seconds")),
-        "total_time_seconds": result.get("total_time_seconds"),
-        "cpu_time_seconds": result.get("cpu_time_seconds"),
-        "num_vars": result.get("num_vars"),
-        "num_clauses": result.get("num_clauses", result.get("num_constraints")),
-        "conflicts": result.get("conflicts"),
-        "expected_status": instance["expected_status"],
-        "error": " ".join(str(result.get("error") or "").split()),
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-    }
-
-
-def _format(value):
-    """Chuyển None thành chuỗi rỗng để CSV sạch."""
-    return "" if value is None else value
-
-
-def _schedule_to_lists(schedule, w, g):
-    """Chuyển schedule[week][group] sang list lồng để ghi JSON."""
-    return [[list(schedule[k][j]) for j in range(g)] for k in range(w)]
-
-
-def _schedule_from_lists(data, w, g):
-    """Dựng lại schedule[week][group] từ list lồng."""
-    return {k: {j: list(data[k][j]) for j in range(g)} for k in range(w)}
+    return result_to_csv_v1_row(
+        dict(result, w=w, g=g, s=s, method=method, encoding=encoding, solver=solver)
+    )
 
 
 def _kill_tree(proc):
@@ -208,7 +199,12 @@ def _kill_tree(proc):
         try:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                            capture_output=True, timeout=15)
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
             pass
     if proc.poll() is None:
         proc.kill()
@@ -226,59 +222,61 @@ def _drain(proc, timeout=5):
             return None, None
 
 
-def _run_case_isolated(instance, case, timeout_seconds, run_budget, work_dir,
-                       startup_allowance):
+def _run_case_isolated(instance, case, run_budget, num_threads, work_dir, startup_allowance):
     """Chạy một lượt trong worker riêng, hard-cap tính từ lúc bắt đầu dựng mô hình."""
+    work_dir = work_dir.resolve()
     token = uuid.uuid4().hex
     spec_path = work_dir / f".spec-{token}.json"
     out_path = work_dir / f".out-{token}.json"
     start_path = work_dir / f".start-{token}.txt"
     spec = {
         "label": instance["label"], "w": instance["w"], "g": instance["g"],
-        "s": instance["s"], "expected_status": instance["expected_status"],
+        "s": instance["s"],
         "method": case[0], "encoding": case[1], "solver": case[2], "sb": case[3],
-        "timeout_seconds": timeout_seconds, "start_path": str(start_path),
+        "timeout_seconds": run_budget, "num_threads": num_threads,
+        "start_path": str(start_path),
     }
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
     root = Path(__file__).resolve().parents[1]
+    proc = None
     try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "benchmarks.run_all", WORKER_FLAG,
              str(spec_path), str(out_path)],
             cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
+            start_new_session=os.name != "nt",
         )
-        wait_until = time.time() + startup_allowance
-        while time.time() < wait_until and not start_path.exists():
+        wait_until = time.perf_counter() + startup_allowance
+        while time.perf_counter() < wait_until and not start_path.exists():
             if proc.poll() is not None:
                 break
             time.sleep(0.005)
         if not start_path.exists():
+            if proc.poll() == 0 and out_path.exists():
+                return json.loads(out_path.read_text(encoding="utf-8"))
             _kill_tree(proc)
             _, stderr = _drain(proc)
             detail = (stderr or "").strip()[-1000:]
             return {"status": "ERROR", "error": f"worker did not start: {detail}"}
 
         started_at = float(start_path.read_text(encoding="utf-8").strip())
-        remaining = run_budget - (time.time() - started_at)
-        if remaining <= 0:
-            _kill_tree(proc)
-            _drain(proc)
-            return {
-                "status": "TIMEOUT",
-                "error": (f"whole-run budget {run_budget:g}s exhausted before "
-                          "the model was built"),
-                "total_time_seconds": time.time() - started_at,
-            }
+        remaining = max(0.0, run_budget - (time.perf_counter() - started_at))
         try:
             _, stderr = proc.communicate(timeout=remaining)
         except subprocess.TimeoutExpired:
+            elapsed = time.perf_counter() - started_at
+            completed = (
+                json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else None
+            )
             _kill_tree(proc)
-            _, stderr = _drain(proc)
+            _drain(proc)
+            if completed is not None and completed["total_time_seconds"] <= run_budget:
+                return completed
             return {
                 "status": "TIMEOUT",
                 "error": f"whole-run budget {run_budget:g}s exceeded (build included)",
-                "total_time_seconds": time.time() - started_at,
+                "total_time_seconds": elapsed,
             }
 
         if proc.returncode != 0 or not out_path.exists():
@@ -286,12 +284,19 @@ def _run_case_isolated(instance, case, timeout_seconds, run_budget, work_dir,
             return {"status": "ERROR",
                     "error": f"worker exited with code {proc.returncode}: {detail}"}
         result = json.loads(out_path.read_text(encoding="utf-8"))
-        if isinstance(result.get("schedule"), list):
-            result["schedule"] = _schedule_from_lists(
-                result["schedule"], instance["w"], instance["g"])
+        if result["total_time_seconds"] > run_budget:
+            return {
+                "status": "TIMEOUT",
+                "error": f"whole-run budget {run_budget:g}s exceeded (verification included)",
+                "total_time_seconds": result["total_time_seconds"],
+            }
         return result
     finally:
-        for path in (spec_path, out_path, start_path):
+        if proc is not None and proc.poll() is None:
+            _kill_tree(proc)
+            _drain(proc)
+        for path in (spec_path, out_path, out_path.with_suffix(".tmp"),
+                     start_path, start_path.with_suffix(".tmp")):
             try:
                 path.unlink()
             except OSError:
@@ -303,62 +308,30 @@ def _worker_main(spec_path, out_path):
     spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     instance = {
         "label": spec["label"], "w": spec["w"], "g": spec["g"], "s": spec["s"],
-        "expected_status": spec.get("expected_status", ""),
     }
     case = (spec["method"], spec["encoding"], spec["solver"], spec["sb"])
 
-    # Nạp sẵn module solver trước khi mở đồng hồ để import không tính vào ngân sách.
-    if case[0] == "sat":
-        from src.sat_runner import solve_cnf  # noqa: F401
-    elif case[0] == "order":
-        from src.order_encoder import solve_sgp_order  # noqa: F401
-    elif case[0] == "cp":
-        from src.cp_solver import solve_sgp_cp  # noqa: F401
-    else:
-        from src.ilp_solver import solve_sgp_ilp  # noqa: F401
-
-    start_path = spec.get("start_path")
-    if start_path:
-        Path(start_path).write_text(str(time.time()), encoding="utf-8")
-    try:
-        result = run_case(instance, case, spec["timeout_seconds"])
-    except NotImplementedError as exc:
-        result = {"status": "UNAVAILABLE", "error": str(exc)}
-    except Exception as exc:
-        result = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    result = _prepare_case(case[0])
+    if result is None:
+        started = time.perf_counter()
+        start_path = Path(spec["start_path"])
+        start_temp = start_path.with_suffix(".tmp")
+        start_temp.write_text(str(started), encoding="utf-8")
+        start_temp.replace(start_path)
+        result = _execute_case(instance, case, spec["timeout_seconds"], spec["num_threads"], started)
     result.pop("model", None)
-    if result.get("schedule"):
-        result["schedule"] = _schedule_to_lists(result["schedule"], spec["w"], spec["g"])
-    Path(out_path).write_text(
-        json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
+    result.pop("schedule", None)
+    output = Path(out_path)
+    pending = output.with_suffix(".tmp")
+    pending.write_text(json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
+    pending.replace(output)
     return 0
 
 
-def _load_done(path):
-    """Đọc trạng thái các lượt đã có: khóa (gồm timeout và scope) -> (status, attempt)."""
-    done = {}
-    if not path.exists() or path.stat().st_size == 0:
-        return done
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames != FIELDS:
-            raise ValueError(
-                f"{path}: incompatible CSV header; use a new --output file "
-                "or migrate the existing CSV before using --resume"
-            )
-        for row in reader:
-            key = (row.get("instance", ""), row.get("method", ""),
-                   row.get("encoding", ""), row.get("solver", ""),
-                   row.get("sb", ""), row.get("timeout_seconds", ""),
-                   row.get("timeout_scope", ""))
-            try:
-                attempt = int(row.get("attempt") or 1)
-            except (TypeError, ValueError):
-                attempt = 1
-            previous = done.get(key)
-            done[key] = (row.get("status", "").upper(),
-                         max(attempt, previous[1] if previous else attempt))
-    return done
+def _reference_mismatch(status, expected):
+    """Phát hiện kết luận lệch dữ liệu tham khảo."""
+    actual = "UNSAT" if status == "UNSAT_PRECHECK" else status
+    return expected in ("SAT", "UNSAT") and status in TERMINAL_STATUSES and actual != expected
 
 
 def main(argv=None):
@@ -370,12 +343,14 @@ def main(argv=None):
     parser.add_argument("--methods", default=",".join(METHODS))
     parser.add_argument("--encodings", default=",".join(C2_ENCODINGS))
     parser.add_argument("--solvers", default=",".join(SAT_SOLVERS))
-    parser.add_argument("--sb", default="none")
-    parser.add_argument("--timeout", type=float, default=60.0,
-                        help="giới hạn cho tiến trình solver (không gồm dựng CNF)")
-    parser.add_argument("--run-budget", type=float, default=0.0,
-                        help="giới hạn toàn lượt, tính từ lúc bắt đầu dựng mô hình; "
-                             "khi bật, --timeout được thay bằng ngân sách này (0 = tắt)")
+    parser.add_argument("--sb", default="none", choices=SB_MODES)
+    parser.add_argument("--timeout", type=float,
+                        help="giới hạn riêng của backend, phạm vi khác nhau theo phương pháp")
+    parser.add_argument("--run-budget", type=float,
+                        help="giới hạn từ dựng mô hình đến kiểm chứng, mặc định 60 giây "
+                             "khi không có --timeout; 0 dùng giới hạn backend")
+    parser.add_argument("--threads", type=int, default=1,
+                        help="số luồng CP/ILP (mặc định 1); SAT/Order luôn dùng 1")
     parser.add_argument("--startup-allowance", type=float, default=STARTUP_ALLOWANCE,
                         help="thời gian chờ worker khởi động trước khi áp ngân sách")
     parser.add_argument("--max-clauses", type=int, default=DEFAULT_MAX_CLAUSES,
@@ -388,107 +363,143 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
-    if not Path(args.instances).exists():
-        raise SystemExit(f"Instance file not found: {args.instances}")
+    if args.timeout is not None and (not isfinite(args.timeout) or args.timeout <= 0):
+        parser.error("--timeout must be a finite positive number")
+    if args.run_budget is not None and (not isfinite(args.run_budget) or args.run_budget < 0):
+        parser.error("--run-budget must be a finite non-negative number")
+    if args.threads < 1:
+        parser.error("--threads must be a positive integer")
+    if not isfinite(args.startup_allowance) or args.startup_allowance <= 0:
+        parser.error("--startup-allowance must be a finite positive number")
+    if args.budget_seconds is not None and (not isfinite(args.budget_seconds) or args.budget_seconds < 0):
+        parser.error("--budget-seconds must be a finite non-negative number")
+    if args.max_clauses < 0 or (args.limit is not None and args.limit < 0):
+        parser.error("--max-clauses and --limit must be non-negative")
 
-    instances = load_instances(args.instances)
+    instance_path = Path(args.instances).resolve()
+    try:
+        instances = load_instances(instance_path)
+    except (OSError, ValueError, csv.Error) as exc:
+        parser.error(str(exc))
     if args.limit is not None:
         instances = instances[:args.limit]
     methods = _split(args.methods, METHODS, "--methods")
     encodings = _split(args.encodings, C2_ENCODINGS, "--encodings")
     solvers = _split(args.solvers, SAT_SOLVERS, "--solvers")
-    sb_modes = _split(args.sb, SB_MODES, "--sb")
-
-    cases = build_cases(methods, encodings, solvers, sb_modes)
+    cases = build_cases(methods, encodings, solvers, (args.sb,))
+    if not cases:
+        parser.error("No method supports the selected SB")
+    if args.threads != 1 and any(case[0] in CNF_METHODS for case in cases):
+        parser.error("--threads must be 1 when the benchmark includes SAT or Order")
+    if args.run_budget is None:
+        run_budget = DEFAULT_RUN_BUDGET if args.timeout is None else 0.0
+    else:
+        run_budget = args.run_budget
+    case_timeout = run_budget or args.timeout or DEFAULT_RUN_BUDGET
+    timeout_scope = "total" if run_budget else "solver"
     print(f"Instances: {len(instances)} | configs: {len(cases)} | "
-          f"planned runs: {len(instances) * len(cases)}")
+          f"planned runs: {len(instances) * len(cases)} | "
+          f"timeout: {case_timeout:g}s ({timeout_scope}) | threads: {args.threads}")
     if args.dry_run:
         for case in cases:
             print("   ", case)
         return 0
 
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    run_budget = max(0.0, args.run_budget)
-    timeout_scope = "total" if run_budget > 0 else TIMEOUT_SCOPE
-    case_timeout = run_budget if run_budget > 0 else args.timeout
+    output = Path(args.output).resolve()
+    if output == instance_path or (output.exists() and instance_path.samefile(output)):
+        parser.error("--output must be separate from the instance input")
+    config = {
+        "sb": args.sb, "timeout_seconds": case_timeout, "timeout_scope": timeout_scope,
+        "num_threads": args.threads,
+    }
     try:
-        done = _load_done(output) if args.resume else {}
-    except ValueError as exc:
-        parser.error(str(exc))
-    mode = "a" if args.resume and output.exists() else "w"
+        with benchmark_csv_lock(output):
+            rows = load_benchmark_csv_rows(output) if args.resume else {}
+            if not rows:
+                save_benchmark_csv_rows(output, rows)
+            set_benchmark_csv_config(output, config, resume=bool(rows))
+            return _run_suite(args, instances, cases, output, rows, run_budget, case_timeout)
+    except (OSError, ValueError, csv.Error) as exc:
+        parser.error(f"{output}: {exc}")
+
+
+def _run_suite(args, instances, cases, output, rows, run_budget, case_timeout):
+    """Chạy và lưu kết quả từng ca benchmark."""
     start_all = time.perf_counter()
     written = 0
     error_rows = 0
     precheck_rows = 0
+    reference_mismatches = 0
     counts = {}
     stopped = False
 
-    with output.open(mode, encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDS)
-        if mode == "w" or output.stat().st_size == 0:
-            writer.writeheader()
-            handle.flush()
-
-        for index, instance in enumerate(instances, start=1):
-            estimate = estimate_cnf_clauses(instance["w"], instance["g"], instance["s"])
-            for case in cases:
-                key = ((instance["label"],) + case
-                       + (f"{case_timeout:g}", timeout_scope))
-                previous = done.get(key)
-                if previous is not None and previous[0] in TERMINAL_STATUSES:
-                    continue
-                over_cap = (case[0] in CNF_METHODS and args.max_clauses > 0
-                            and estimate > args.max_clauses)
-                if previous is not None and previous[0] == "SKIPPED_RESOURCE_LIMIT" and over_cap:
-                    continue
-                attempt = previous[1] + 1 if previous is not None else 1
-                if (args.budget_seconds is not None
-                        and time.perf_counter() - start_all > args.budget_seconds):
-                    print("[stop] budget-seconds exhausted")
-                    stopped = True
-                    break
-                started = time.perf_counter()
-                if over_cap:
-                    result = {
-                        "status": "SKIPPED_RESOURCE_LIMIT",
-                        "error": (f"estimated {estimate:,} C3 clauses (lower bound) "
-                                  f"> cap {args.max_clauses:,}"),
-                    }
-                else:
-                    try:
-                        if run_budget > 0:
-                            result = _run_case_isolated(
-                                instance, case, case_timeout, run_budget,
-                                output.parent, args.startup_allowance)
-                        else:
-                            result = run_case(instance, case, case_timeout)
-                    except NotImplementedError as exc:
-                        result = {"status": "UNAVAILABLE", "error": str(exc)}
-                    except Exception as exc:
-                        result = {"status": "ERROR",
-                                  "error": f"{type(exc).__name__}: {exc}"}
-                row = build_row(instance, case, result, f"{case_timeout:g}",
-                                timeout_scope, attempt)
-                writer.writerow({field: _format(row[field]) for field in FIELDS})
-                handle.flush()
-                written += 1
-                done[key] = (row["status"], attempt)
-                if row["status"] == "ERROR":
-                    error_rows += 1
-                if row["backend_type"] == "precheck":
-                    precheck_rows += 1
-                elapsed = time.perf_counter() - started
-                counts[(case[0], row["status"])] = counts.get(
-                    (case[0], row["status"]), 0) + 1
-                mark = ""
-                if row["expected_status"] and row["status"] != row["expected_status"]:
-                    mark = f"  [!] expected {row['expected_status']}"
-                print(f"[{index}/{len(instances)}] {instance['label']:>7} "
-                      f"{case[0]:>5} {case[1] or '-':>11} {case[2]:>7} sb={case[3]:<4} "
-                      f"-> {row['status']:>21} {elapsed:6.2f}s{mark}", flush=True)
-            if stopped:
+    for index, instance in enumerate(instances, start=1):
+        w, g, s = instance["w"], instance["g"], instance["s"]
+        label = f"{g}-{s}-{w}"
+        estimate = estimate_cnf_clauses(w, g, s)
+        expected = instance["expected_status"]
+        for case in cases:
+            key = (label, *case[:3])
+            previous = rows[key]["status"] if key in rows else ""
+            if previous in TERMINAL_STATUSES:
+                if _reference_mismatch(previous, expected):
+                    reference_mismatches += 1
+                    print(f"[!] {label} {case[0]} saved {previous}; expected {expected}")
+                continue
+            if (args.budget_seconds is not None
+                    and time.perf_counter() - start_all > args.budget_seconds):
+                print("[stop] budget-seconds exhausted")
+                stopped = True
                 break
+            started = time.perf_counter()
+            feasible, _, _ = check_partner_bound(w, g, s)
+            over_cap = (case[0] in CNF_METHODS and args.max_clauses > 0
+                        and estimate > args.max_clauses)
+            if not feasible:
+                result = {
+                    "status": "UNSAT", "backend_type": "precheck",
+                    "total_time_seconds": time.perf_counter() - started,
+                }
+            elif previous == "SKIPPED_RESOURCE_LIMIT" and over_cap:
+                continue
+            elif over_cap:
+                result = {
+                    "status": "SKIPPED_RESOURCE_LIMIT",
+                    "error": (f"estimated {estimate:,} C3 clauses (lower bound) "
+                              f"> cap {args.max_clauses:,}"),
+                    "total_time_seconds": time.perf_counter() - started,
+                }
+            elif run_budget > 0:
+                try:
+                    result = _run_case_isolated(
+                        instance, case, run_budget, args.threads,
+                        output.parent, args.startup_allowance)
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    result = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+            else:
+                result = _prepare_case(case[0])
+                if result is None:
+                    result = _execute_case(
+                        instance, case, case_timeout, args.threads, time.perf_counter()
+                    )
+
+            row = build_row(instance, case, result)
+            rows[key] = row
+            save_benchmark_csv_rows(output, rows)
+            written += 1
+            status = row["status"]
+            error_rows += status == "ERROR"
+            precheck_rows += status == "UNSAT_PRECHECK"
+            counts[(case[0], status)] = counts.get((case[0], status), 0) + 1
+            mismatch = _reference_mismatch(status, expected)
+            reference_mismatches += mismatch
+            mark = f"  [!] expected {expected}" if mismatch else ""
+            elapsed = time.perf_counter() - started
+            print(f"[{index}/{len(instances)}] {label:>7} "
+                  f"{case[0]:>5} {case[1] or '-':>11} {case[2]:>7} sb={case[3]:<4} "
+                  f"-> {status:>21} {elapsed:6.2f}s{mark}", flush=True)
+        if stopped:
+            break
 
     print(f"\nWritten rows: {written} -> {output}")
     for (method, status), count in sorted(counts.items()):
@@ -496,8 +507,9 @@ def main(argv=None):
     print(f"  precheck (decided by bound): {precheck_rows}")
     if error_rows:
         print(f"[error] {error_rows} lượt kết thúc với status=ERROR", file=sys.stderr)
-        return 1
-    return 0
+    if reference_mismatches:
+        print(f"[error] {reference_mismatches} kết luận khác dữ liệu tham khảo", file=sys.stderr)
+    return int(bool(error_rows or reference_mismatches))
 
 
 if __name__ == "__main__":

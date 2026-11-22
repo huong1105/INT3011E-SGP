@@ -10,7 +10,7 @@ import time
 from pysat.card import CardEnc, EncType
 
 from .io_utils import check_partner_bound, configure_safe_stdio
-from .sat_runner import solve_cnf
+from .sat_runner import SOLVER_BACKENDS, normalise_sat_options, solve_cnf
 from .verifier import verify_schedule
 
 ORDER_SB_MODES = ("none", "sb1")
@@ -158,15 +158,17 @@ def solve_sgp_order(w: int, g: int, s: int, solver: str = "cadical",
                     timeout_seconds: float | None = None, sb: str = "none"):
     """Sinh CNF Order Encoding, giải và kiểm chứng lịch."""
     _check_sb(sb)
+    solver, timeout_seconds = normalise_sat_options(solver, timeout_seconds)
     started = time.perf_counter()
 
     feasible_bound, w_max, unsat_reason = check_partner_bound(w, g, s)
     if not feasible_bound:
         return {
-            "status": "UNSAT", "method": "order", "encoding": "order",
-            "backend_type": "precheck", "w": w, "g": g, "s": s, "n": g * s, "sb": sb,
+            "status": "UNSAT", "method": "order", "encoding": "order", "solver": solver,
+            "backend": "theoretical-bound", "backend_type": "precheck",
+            "w": w, "g": g, "s": s, "n": g * s, "sb": sb,
             "num_vars": None, "num_clauses": None, "schedule": None,
-            "verified": False, "error": None, "solver_wall_time_seconds": 0.0,
+            "verified": False, "error": None, "solver_wall_time_seconds": None,
             "total_time_seconds": time.perf_counter() - started,
             "stats": {"precheck_unsat": True, "w_max": w_max, "unsat_reason": unsat_reason},
         }
@@ -216,18 +218,22 @@ def main(argv=None):
     parser.add_argument("-w", type=int, required=True)
     parser.add_argument("-g", type=int, required=True)
     parser.add_argument("-s", type=int, required=True)
-    parser.add_argument("--solver", default="cadical", choices=("cadical", "glucose"))
+    parser.add_argument("--solver", default="cadical", choices=tuple(SOLVER_BACKENDS))
     parser.add_argument("--sb", default="none", choices=ORDER_SB_MODES,
                         help="symmetry breaking: none or sb1 (SB2 is SAT-direct only)")
-    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--timeout", type=float, default=60.0,
+                        help="SAT backend time limit in seconds, including startup and CNF loading")
     parser.add_argument("--zero-based", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
-    result = solve_sgp_order(args.w, args.g, args.s, solver=args.solver,
-                             timeout_seconds=args.timeout, sb=args.sb)
+    try:
+        result = solve_sgp_order(args.w, args.g, args.s, solver=args.solver,
+                                 timeout_seconds=args.timeout, sb=args.sb)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.json:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2, ensure_ascii=True))
     else:
         print_result(result, one_based=not args.zero_based)
     return 0 if result["status"] in ("SAT", "UNSAT", "TIMEOUT") else 1

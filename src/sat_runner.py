@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, version
 from itertools import combinations
 import json
@@ -72,7 +73,7 @@ def _normalise_cnf(clauses, num_vars):
     return normalised, num_vars
 
 
-def _normalise_options(solver, timeout_seconds):
+def normalise_sat_options(solver, timeout_seconds):
     """Kiểm tra tên solver và giới hạn thời gian."""
     if not isinstance(solver, str) or solver.lower() not in SOLVER_BACKENDS:
         raise ValueError(f"solver must be one of {', '.join(SOLVER_BACKENDS)}")
@@ -200,7 +201,7 @@ def solve_cnf(clauses, solver="cadical", timeout_seconds=None, num_vars=None):
     """Giải CNF bằng solver được chọn và kiểm tra model trước khi trả SAT."""
     clauses, num_vars = _normalise_cnf(clauses, num_vars)
     solver_requested = solver
-    solver, timeout_seconds = _normalise_options(solver, timeout_seconds)
+    solver, timeout_seconds = normalise_sat_options(solver, timeout_seconds)
     backend = SOLVER_BACKENDS[solver]
     result = _run_pysat(clauses, backend, timeout_seconds, num_vars)
     result["solver"] = solver
@@ -248,15 +249,21 @@ def verify_sat_schedule(schedule, w, g, s):
 
 
 def solve_sgp(w, g, s, encoding="nsc", solver="cadical", timeout_seconds=None,
-              symmetry_clauses=None):
-    """Sinh CNF, giải và kiểm chứng lịch; cận tuần vô nghiệm trả UNSAT bằng precheck."""
+              symmetry_clauses=None, *,
+              on_encoded: Callable[[list[list[int]], int], None] | None = None):
+    """Sinh CNF, giải và kiểm chứng lịch SGP."""
     solver_requested = solver
-    solver, timeout_seconds = _normalise_options(solver, timeout_seconds)
+    solver, timeout_seconds = normalise_sat_options(solver, timeout_seconds)
     from .sat_direct_encoders import encode_sgp, extract_schedule
 
     started = time.perf_counter()
     clauses, num_vars, stats = encode_sgp(w, g, s, encoding, symmetry_clauses)
-    encode_time = time.perf_counter() - started
+    encoded_at = time.perf_counter()
+    encode_time = encoded_at - started
+    callback_seconds = 0.0
+    if on_encoded is not None:
+        on_encoded(clauses, num_vars)
+        callback_seconds = time.perf_counter() - encoded_at
     if stats.get("precheck_unsat"):
         result = _empty_result("theoretical-bound", num_vars, len(clauses))
         result.update(status="UNSAT", backend_type="precheck", solver=solver)
@@ -277,7 +284,7 @@ def solve_sgp(w, g, s, encoding="nsc", solver="cadical", timeout_seconds=None,
             else:
                 result.update(status="ERROR", model=None, model_verified=False,
                               error="SAT model decoded to an invalid SGP schedule")
-    result["total_time_seconds"] = time.perf_counter() - started
+    result["total_time_seconds"] = time.perf_counter() - started - callback_seconds
     return result
 
 

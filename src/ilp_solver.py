@@ -33,6 +33,34 @@ def _env():
         _ENV = env
     return _ENV
 
+
+def _gurobi_failure(exc, phase):
+    """Phân loại lỗi Gurobi."""
+    unavailable_codes = {
+        GRB.ERROR_NO_LICENSE,
+        GRB.ERROR_SIZE_LIMIT_EXCEEDED,
+        GRB.ERROR_NETWORK,
+        GRB.ERROR_CLOUD,
+        GRB.ERROR_JOB_REJECTED,
+        GRB.ERROR_CSWORKER,
+    }
+    return {
+        "status": "UNAVAILABLE" if exc.errno in unavailable_codes else "ERROR",
+        "error": f"Gurobi {phase} failed ({exc.errno}): {exc}",
+    }
+
+
+def prepare_gurobi():
+    """Khởi tạo môi trường Gurobi trước khi đo."""
+    if gp is None:
+        return {"status": "UNAVAILABLE", "error": f"Gurobi unavailable: {_GUROBI_IMPORT_ERROR}"}
+    try:
+        _env()
+    except gp.GurobiError as exc:
+        return _gurobi_failure(exc, "initialization")
+    return None
+
+
 def _positive_init(name, value):
     """Kiểm tra tham số nguyên dương."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -42,11 +70,15 @@ def _timeout_seconds(timeout_seconds):
     """Kiểm tra và chuẩn hóa giới hạn thời gian."""
     if timeout_seconds is None:
         return None
+    error = "timeout_seconds must be a finite positive number or None"
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, numbers.Real):
-        raise ValueError(f"timeout_seconds must be a finite positive number or None")
-    value = float(timeout_seconds)
+        raise ValueError(error)
+    try:
+        value = float(timeout_seconds)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(error) from exc
     if not math.isfinite(value) or value <= 0:
-        raise ValueError(f"timeout_seconds must be a finite positive number or None")
+        raise ValueError(error)
     return value
 
 def build_ilp_model(w, g, s, sb="none"):
@@ -110,7 +142,7 @@ def _extract_schedule(x, w, g, s):
 
     return schedule
 
-def solve_sgp_ilp(w, g, s, timeout_seconds=None, sb="none"):
+def solve_sgp_ilp(w, g, s, timeout_seconds=None, sb="none", *, num_threads=None):
     """Giải SGP bằng ILP và kiểm chứng nghiệm."""
     _positive_init("w", w)
     _positive_init("g", g)
@@ -118,12 +150,15 @@ def solve_sgp_ilp(w, g, s, timeout_seconds=None, sb="none"):
     timeout_seconds = _timeout_seconds(timeout_seconds)
     if sb not in VALID_SB_MODES:
         raise ValueError(f"sb must be one of {VALID_SB_MODES}, got {sb!r}")
+    if num_threads is not None:
+        _positive_init("num_threads", num_threads)
 
     started = time.perf_counter()
     n = g * s
     result = {"status": "ERROR", "method": "ilp", "solver": "gurobi", "backend": "gurobi",
         "solver_version": None, "w": w, "g": g, "s": s, "n": n, "sb": sb,
-        "model_build_time_seconds": 0.0, "solver_wall_time_seconds": None,
+        "num_threads": num_threads,
+        "model_build_time_seconds": None, "solver_wall_time_seconds": None,
         "wall_time_seconds": 0.0, "cpu_time_seconds": None, "total_time_seconds": 0.0,
         "num_vars": None, "num_constraints": None, "num_binary_vars": None,
         "stats": None, "schedule": None, "verified": False,
@@ -133,14 +168,15 @@ def solve_sgp_ilp(w, g, s, timeout_seconds=None, sb="none"):
 
     if not feasible_bound:
         result.update(
-            status = "UNSAT", backend_type="precheck", solver_wall_time_seconds = 0.0,
+            status="UNSAT", backend="theoretical-bound", backend_type="precheck",
             stats = {"n": n, "g": g, "s": s, "w": w, "w_max": w_max, "precheck_unsat": True, "unsat_reason": unsat_reason},
         )
         result["total_time_seconds"] = time.perf_counter() - started
         return result
 
-    if gp is None:
-        result.update(status="UNAVAILABLE", error=f"Gurobi unavailable: {_GUROBI_IMPORT_ERROR}")
+    preparation_error = prepare_gurobi()
+    if preparation_error is not None:
+        result.update(preparation_error)
         result["total_time_seconds"] = time.perf_counter() - started
         return result
 
@@ -149,27 +185,23 @@ def solve_sgp_ilp(w, g, s, timeout_seconds=None, sb="none"):
         model, x, stats = build_ilp_model(w, g, s, sb=sb)
         result["model_build_time_seconds"] = time.perf_counter() - build_start
         result["solver_version"] = ".".join(str(part) for part in gp.gurobi.version())
-
+        result.update(stats=stats, num_vars=model.NumVars,
+                      num_constraints=model.NumConstrs, num_binary_vars=model.NumBinVars)
+        if timeout_seconds is not None:
+            model.Params.TimeLimit = timeout_seconds
+        if num_threads is not None:
+            model.Params.Threads = num_threads
     except gp.GurobiError as exc:
-        result.update(status="UNAVAILABLE", error=f"Gurobi unavailable: {exc}")
+        result.update(_gurobi_failure(exc, "model setup"))
         result["total_time_seconds"] = time.perf_counter() - started
         return result
-
-    result["stats"] = stats
-    if timeout_seconds is not None:
-        model.Params.TimeLimit = timeout_seconds
 
     cpu_start = time.process_time()
     wall_start = time.perf_counter()
     try:
         model.optimize()
     except gp.GurobiError as exc:
-        message = str(exc)
-        limited = "size-limited" in message.lower() or "license" in message.lower()
-        result.update(
-            status="UNAVAILABLE" if limited else "ERROR",
-            error=f"Gurobi error: {message}",
-        )
+        result.update(_gurobi_failure(exc, "optimization"))
         result["wall_time_seconds"] = time.perf_counter() - wall_start
         result["cpu_time_seconds"] = time.process_time() - cpu_start
         result["total_time_seconds"] = time.perf_counter() - started
@@ -177,9 +209,6 @@ def solve_sgp_ilp(w, g, s, timeout_seconds=None, sb="none"):
     result["cpu_time_seconds"] = time.process_time() - cpu_start
     result["wall_time_seconds"] = time.perf_counter() - wall_start
     result["solver_wall_time_seconds"] = float(model.Runtime)
-    result["num_vars"] = model.NumVars
-    result["num_constraints"] = model.NumConstrs
-    result["num_binary_vars"] = model.NumBinVars
 
     status = model.Status
     result["solver_status"] = {
@@ -202,20 +231,20 @@ def solve_sgp_ilp(w, g, s, timeout_seconds=None, sb="none"):
         result["status"] = "UNSAT"
     elif status == GRB.TIME_LIMIT:
         # Giữ và kiểm chứng lịch đã tìm được trong thời gian cho phép.
+        limit_note = f" at {timeout_seconds:g}s" if timeout_seconds is not None else ""
         if model.SolCount > 0:
             schedule = _extract_schedule(x, w, g, s)
             valid, errors = verify_schedule(schedule, w, g, s)
             result["verification_errors"] = errors
             if valid:
                 result.update(status="SAT", schedule=schedule, verified=True,
-                              error=f"Gurobi TIME_LIMIT at {timeout_seconds:g}s; "
-                                    "verified incumbent kept")
+                              error=f"Gurobi TIME_LIMIT{limit_note}; verified incumbent kept")
             else:
                 result.update(status="ERROR",
                               error="Time-limit incumbent is not a valid schedule")
         else:
             result.update(status="TIMEOUT",
-                          error=f"Gurobi exceeded {timeout_seconds:g} seconds")
+                          error=f"Gurobi TIME_LIMIT{limit_note}")
     else:
         result.update(status="ERROR", error=f"Gurobi status {status}")
 
@@ -232,14 +261,20 @@ def main(argv=None):
     parser.add_argument("-g", type=int, required=True)
     parser.add_argument("-s", type=int, required=True)
     parser.add_argument("--sb", default="none", choices=VALID_SB_MODES)
-    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--timeout", type=float, default=60.0,
+                        help="Gurobi optimization time limit in seconds")
+    parser.add_argument("--threads", type=int, default=None, help="Gurobi optimizer threads")
     parser.add_argument("--zero-based", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
-    result = solve_sgp_ilp(args.w, args.g, args.s, timeout_seconds=args.timeout, sb=args.sb)
+    try:
+        result = solve_sgp_ilp(args.w, args.g, args.s, timeout_seconds=args.timeout,
+                               sb=args.sb, num_threads=args.threads)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.json:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2, ensure_ascii=True))
     else:
         print_result(result, one_based=not args.zero_based)
     return 0 if result["status"] in ("SAT", "UNSAT", "TIMEOUT") else 1

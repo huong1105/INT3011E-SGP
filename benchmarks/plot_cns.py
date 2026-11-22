@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+from math import isfinite
 from pathlib import Path
 import sys
 from typing import Sequence
@@ -60,22 +62,6 @@ def _format_sat_label(sat_solver: str) -> str:
     return METHOD_SOLVER_LABELS.get(("sat", key), f"SAT ({_format_solver_name(sat_solver)})")
 
 
-def _format_ilp_label(df: pd.DataFrame) -> str:
-    """Trả về nhãn hiển thị cho nhánh ILP theo solver có trong dữ liệu."""
-    ilp_rows = df[df["method"] == "ilp"]
-    solvers = [
-        item
-        for item in ilp_rows["solver"].fillna("").astype(str).str.strip().str.lower().unique()
-        if item
-    ]
-    if "cplex" in solvers and "gurobi" not in solvers:
-        return METHOD_SOLVER_LABELS[("ilp", "cplex")]
-    if solvers:
-        key = solvers[0]
-        return METHOD_SOLVER_LABELS.get(("ilp", key), f"ILP ({_format_solver_name(key)})")
-    return "ILP (Gurobi)"
-
-
 TIME_COLUMN_CANDIDATES = (
     "total_time_seconds",
     "solver_wall_time_seconds",
@@ -101,7 +87,6 @@ def _resolve_column(df: pd.DataFrame, candidates: Sequence[str]) -> str | None:
 def _normalize_results_df(df: pd.DataFrame, time_col: str | None = None) -> pd.DataFrame:
     """Chuẩn hóa DataFrame kết quả benchmark và loại bỏ dòng thử lại trùng lặp."""
     df = df.copy()
-    rename_map: dict[str, str] = {}
 
     if time_col is not None:
         selected_time_col = _resolve_column(df, (time_col,))
@@ -115,15 +100,14 @@ def _normalize_results_df(df: pd.DataFrame, time_col: str | None = None) -> pd.D
             raise ValueError(
                 f"No runtime column found in CSV. Available columns: {list(df.columns)}"
             )
-    if selected_time_col != "solve_time":
-        rename_map[selected_time_col] = "solve_time"
+    df["solve_time"] = pd.to_numeric(df[selected_time_col], errors="coerce")
+    total_time_col = _resolve_column(df, ("total_time_seconds",))
+    if total_time_col is not None:
+        df[total_time_col] = pd.to_numeric(df[total_time_col], errors="coerce")
 
     enc_col = _resolve_column(df, ("encoding", "amo", "encoder"))
-    if enc_col is not None and enc_col != "encoding":
-        rename_map[enc_col] = "encoding"
-
-    if rename_map:
-        df = df.rename(columns=rename_map)
+    if enc_col is not None:
+        df["encoding"] = df[enc_col]
 
     had_sb = "sb" in df.columns
     for col in ("method", "solver", "encoding", "status", "backend_type"):
@@ -137,11 +121,12 @@ def _normalize_results_df(df: pd.DataFrame, time_col: str | None = None) -> pd.D
         df["sb"] = ""
 
     df["method"] = df["method"].str.lower()
-    df["solver"] = df["solver"].str.lower()
+    df["solver"] = df["solver"].str.lower().replace(
+        {"ortools": "cp-sat", "ortools-cp-sat": "cp-sat"}
+    )
     df["encoding"] = df["encoding"].str.lower()
     df["backend_type"] = df["backend_type"].str.lower()
     df["status"] = df["status"].str.upper()
-    df["solve_time"] = pd.to_numeric(df["solve_time"], errors="coerce")
 
     if "n" not in df.columns:
         if "g" in df.columns and "s" in df.columns:
@@ -165,20 +150,53 @@ def _normalize_results_df(df: pd.DataFrame, time_col: str | None = None) -> pd.D
 
     if "verified" in df.columns:
         df["verified"] = (
-            df["verified"].astype(str).str.lower().isin({"true", "1", "yes"})
+            df["verified"].astype(str).str.strip().str.lower().isin({"true", "1", "1.0", "yes"})
         )
     else:
         df["verified"] = True
 
+    precheck = df["backend_type"] == "precheck"
+    if ((df["status"] == "UNSAT") & (df["backend_type"] == "")).any():
+        sizes = df["instance"].str.extract(r"^([1-9][0-9]*)-([1-9][0-9]*)-([1-9][0-9]*)$")
+        sizes.columns = ["g", "s", "w"]
+        for col in sizes:
+            sizes[col] = pd.to_numeric(sizes[col], errors="coerce")
+            if col in df:
+                sizes[col] = pd.to_numeric(df[col], errors="coerce").fillna(sizes[col])
+        g, s, w = sizes["g"], sizes["s"], sizes["w"]
+        past_bound = (g >= 1) & (s > 1) & (w >= 1) & (w * (s - 1) > g * s - 1)
+        precheck |= (df["status"] == "UNSAT") & (df["backend_type"] == "") & past_bound
+    df.loc[precheck, "status"] = "UNSAT_PRECHECK"
+
+    legacy_timeout = None
+    legacy_scope = None
+    if "timeout_seconds" in df:
+        raw_timeout = df["timeout_seconds"].fillna("").astype(str).str.strip()
+        timeouts = pd.to_numeric(raw_timeout, errors="coerce")
+        invalid = (raw_timeout != "") & ~(timeouts.gt(0) & timeouts.lt(float("inf")))
+        if invalid.any() or timeouts.nunique(dropna=False) > 1:
+            raise ValueError("CSV mixes or has invalid timeouts; use one benchmark configuration per file.")
+        if timeouts.notna().any():
+            legacy_timeout = float(timeouts.iloc[0])
+    if "timeout_scope" in df:
+        scopes = df["timeout_scope"].fillna("").astype(str).str.strip().str.lower().unique()
+        if len(scopes) > 1:
+            raise ValueError("CSV mixes timeout scopes; use one benchmark configuration per file.")
+        legacy_scope = scopes[0]
+
     key_cols = ["instance", "method", "encoding", "solver"] + (["sb"] if had_sb else [])
     if "attempt" in df.columns:
-        df["_attempt_num"] = pd.to_numeric(df["attempt"], errors="coerce").fillna(0)
-        df = df.sort_values("_attempt_num", ascending=True, kind="mergesort")
-        df = df.drop_duplicates(subset=key_cols, keep="last").drop(columns=["_attempt_num"])
-    else:
-        df = df.drop_duplicates(subset=key_cols, keep="last")
+        df = df.sort_values(
+            "attempt", key=lambda col: pd.to_numeric(col, errors="coerce").fillna(0), kind="mergesort"
+        )
+    df = df.drop_duplicates(subset=key_cols, keep="last").reset_index(drop=True)
 
     df.attrs["time_col"] = selected_time_col
+    df.attrs["cutoff_time_col"] = total_time_col or "solve_time"
+    if legacy_scope == "total" and legacy_timeout is not None:
+        if total_time_col is None:
+            raise ValueError("A recorded whole-run cutoff requires total_time_seconds.")
+        df.attrs["run_budget_seconds"] = legacy_timeout
     df.attrs["has_sb"] = had_sb
     return df
 
@@ -193,7 +211,28 @@ def load_results(csv_path: str | Path, time_col: str | None = None) -> pd.DataFr
     if df.empty:
         raise ValueError(f"Benchmark CSV file is empty: {path}")
 
-    return _normalize_results_df(df, time_col=time_col)
+    df = _normalize_results_df(df, time_col=time_col)
+    metadata = path.with_name(f"{path.name}.meta.json")
+    if metadata.exists():
+        settings = json.loads(metadata.read_text(encoding="utf-8"))
+        if not isinstance(settings, dict):
+            raise ValueError(f"{metadata}: expected a benchmark settings object")
+        sb = settings.get("sb")
+        if sb not in ("none", "sb1", "full"):
+            raise ValueError(f"{metadata}: invalid benchmark SB mode")
+        if df.attrs["has_sb"] and set(df["sb"]) != {sb}:
+            raise ValueError(f"{metadata}: SB configuration conflicts with the CSV")
+        df.attrs["benchmark_sb"] = sb
+        if settings.get("timeout_scope") == "total":
+            timeout = settings.get("timeout_seconds")
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not (
+                isfinite(timeout) and timeout > 0
+            ):
+                raise ValueError(f"{metadata}: invalid total benchmark cutoff")
+            if "total_time_seconds" not in {name.lower() for name in df}:
+                raise ValueError(f"{metadata}: total cutoff requires total_time_seconds")
+            df.attrs["run_budget_seconds"] = timeout
+    return df
 
 
 def _filter_solved(df: pd.DataFrame, cutoff: float | None = None) -> pd.DataFrame:
@@ -205,32 +244,48 @@ def _filter_solved(df: pd.DataFrame, cutoff: float | None = None) -> pd.DataFram
         )
     is_sat_ok = (df["status"] == "SAT") & df["verified"]
     is_unsat = df["status"] == "UNSAT"
-    valid_time = df["solve_time"].notna() & (df["solve_time"] >= 0)
+    valid_time = df["solve_time"].ge(0) & df["solve_time"].lt(float("inf"))
     mask = not_precheck & (is_sat_ok | is_unsat) & valid_time
+    budget = df.attrs.get("run_budget_seconds")
+    if cutoff is None:
+        cutoff = budget
     if cutoff is not None:
-        mask = mask & (df["solve_time"] <= cutoff)
+        if not isfinite(cutoff) or cutoff <= 0:
+            raise ValueError("Cutoff must be a finite positive number.")
+        if budget is not None and cutoff > budget:
+            raise ValueError(f"Cutoff cannot exceed the benchmark's {budget:g}s whole-run budget.")
+        runtime = df[df.attrs.get("cutoff_time_col", "solve_time")]
+        mask &= runtime.ge(0) & runtime.le(cutoff)
     filtered = df.loc[mask].copy()
     filtered.attrs.update(df.attrs)
     return filtered
 
 
 def _apply_sb_filter(df: pd.DataFrame, sb: str | None) -> pd.DataFrame:
-    """Lọc theo cấu hình SB khi dữ liệu đầu vào có cột sb không rỗng."""
-    if sb is None or "sb" not in df.columns:
+    """Lọc dữ liệu theo cấu hình SB."""
+    recorded = df.attrs.get("benchmark_sb")
+    mode = sb.lower() if sb is not None else recorded or "none"
+    if recorded is not None and mode != recorded:
+        raise ValueError(f"CSV uses sb={recorded}; cannot plot it with sb={mode}.")
+    if "sb" not in df.columns or not df.attrs.get("has_sb"):
         return df
-    has_nonempty_sb = (df["sb"].fillna("").astype(str).str.strip() != "").any()
-    if not has_nonempty_sb:
-        return df
-    filtered = df[df["sb"] == sb.lower()].copy()
+    filtered = df[df["sb"] == mode].copy()
     filtered.attrs.update(df.attrs)
     return filtered
 
 
 def _time_axis_label(df: pd.DataFrame, mean: bool = False) -> str:
     """Trả về nhãn trục thời gian khớp cột được dùng."""
-    time_col = df.attrs.get("time_col", "total_time_seconds")
+    time_col = df.attrs.get("time_col", "total_time_seconds").lower()
     prefix = "Mean " if mean else ""
-    metric = "Total Time" if time_col == "total_time_seconds" else "Solve Time"
+    metric = {
+        "total_time_seconds": "Total Time",
+        "solver_wall_time_seconds": "Solve Time",
+        "solve_time": "Solve Time",
+        "encode_time_seconds": "Build Time",
+        "model_build_time_seconds": "Build Time",
+        "cpu_time_seconds": "CPU Time",
+    }.get(time_col, "Time")
     return f"{prefix}{metric} (s, log scale)"
 
 
@@ -246,6 +301,13 @@ def _save_both_formats(output_dir: Path, stem: str, dpi: int = 300) -> list[Path
     return saved
 
 
+def _representative_sat(df: pd.DataFrame, encoding: str, solver: str) -> pd.DataFrame:
+    """Chọn mã hóa SAT đại diện."""
+    sat = df[(df["method"] == "sat") & (df["solver"] == solver.lower())]
+    selected = sat["encoding"] == encoding.lower()
+    return sat[selected if selected.any() else sat["encoding"] == ""]
+
+
 def plot_cactus(
     df: pd.DataFrame,
     output_dir: str | Path,
@@ -255,32 +317,40 @@ def plot_cactus(
     cutoff: float | None = None,
 ) -> list[Path]:
     """Vẽ Cactus Plot so sánh SAT, CP và ILP."""
-    solved = _filter_solved(df, cutoff=cutoff)
-    solved = _apply_sb_filter(solved, sb)
-
+    selected = _apply_sb_filter(df, sb)
+    attempted = selected["status"].isin({"SAT", "UNSAT", "TIMEOUT"}) & selected["instance"].ne("")
+    attempts = selected[attempted]
     sat_label = _format_sat_label(sat_solver)
-    ilp_label = _format_ilp_label(df)
-    groups: list[tuple[str, pd.DataFrame]] = [
-        (
-            sat_label,
-            solved[
-                (solved["method"] == "sat")
-                & (solved["solver"] == sat_solver.lower())
-                & ((solved["encoding"] == sat_encoding.lower()) | (solved["encoding"] == ""))
-            ],
-        ),
-        ("CP (OR-Tools CP-SAT)", solved[solved["method"] == "cp"]),
-        (ilp_label, solved[solved["method"] == "ilp"]),
-    ]
+    sat = _representative_sat(selected, sat_encoding, sat_solver)
+    groups = {sat_label: sat[attempted.loc[sat.index]]}
+    if groups[sat_label].empty:
+        print(f"[Warning] No attempted cases for {sat_label}; skipping the three-method cactus plot.")
+        return []
+    for method in ("cp", "ilp"):
+        sub = attempts[attempts["method"] == method]
+        solvers = sub["solver"].unique()
+        if len(solvers) != 1:
+            print(f"[Warning] Cactus requires one {method.upper()} solver with attempted cases; "
+                  "skipping the three-method cactus plot.")
+            return []
+        solver = solvers[0]
+        label = METHOD_SOLVER_LABELS.get(
+            (method, solver), f"{method.upper()} ({_format_solver_name(solver)})"
+        )
+        groups[label] = sub
+
+    common = set.intersection(*(set(sub["instance"]) for sub in groups.values()))
+    if not common:
+        print("[Warning] SAT, CP and ILP share no attempted instances; skipping the cactus plot.")
+        return []
 
     rows: list[dict[str, object]] = []
-    hue_order: list[str] = []
-    for label, sub in groups:
-        if sub.empty:
-            continue
-        per_instance = sub.groupby("instance", as_index=False)["solve_time"].mean()
-        hue_order.append(label)
-        sorted_times = per_instance["solve_time"].sort_values().to_numpy()
+    counts = {}
+    for label, sub in groups.items():
+        solved = _filter_solved(sub[sub["instance"].isin(common)], cutoff=cutoff)
+        per_instance = solved.groupby("instance")["solve_time"].mean()
+        counts[label] = len(per_instance)
+        sorted_times = per_instance.sort_values().to_numpy()
         for idx, t in enumerate(sorted_times, start=1):
             rows.append(
                 {
@@ -291,10 +361,15 @@ def plot_cactus(
             )
 
     if not rows:
-        print("[Warning] Not enough data to generate Cactus Plot (SAT vs CP vs ILP).")
+        print("[Warning] No shared case was solved within the cutoff; skipping the cactus plot.")
         return []
 
+    print(
+        f"Cactus on {len(common)} shared attempted instances: "
+        + ", ".join(f"{label}: {count} solved" for label, count in counts.items())
+    )
     plot_df = pd.DataFrame(rows)
+    hue_order = [label for label in groups if counts[label]]
 
     cns.figure(width=5.4, height=3.6, unit="in", color_cycle="Nature")
     ax = cns.lineplot(
@@ -312,7 +387,11 @@ def plot_cactus(
     ax.set_yscale("log")
     ax.set_xlabel("Number of Solved Instances")
     ax.set_ylabel(_time_axis_label(df, mean=False))
-    ax.set_title(f"Cactus Plot: {sat_label} vs. CP-SAT vs. ILP on SGP")
+    title = f"Cactus Plot ({len(common)} Shared SGP Instances)"
+    zero_solved = [label for label in groups if counts[label] == 0]
+    if zero_solved:
+        title += "\nNo solved cases: " + ", ".join(zero_solved)
+    ax.set_title(title)
     ax.grid(True, which="both", linestyle="--", alpha=0.35)
     cns.take_legend_out()
 
@@ -323,27 +402,37 @@ def plot_c2_encodings(
     df: pd.DataFrame,
     output_dir: str | Path,
     sat_solver: str = "cadical",
-    sb: str | None = "none",
+    sb: str | None = None,
     cutoff: float | None = None,
 ) -> list[Path]:
-    """Vẽ Line Plot so sánh 4 bộ mã hóa C2."""
-    solved = _filter_solved(df, cutoff=cutoff)
-    solved = _apply_sb_filter(solved, sb)
-    sub = solved[
-        (solved["method"] == "sat")
-        & (solved["solver"] == sat_solver.lower())
-        & (solved["encoding"].isin(C2_ENCODING_LABELS.keys()))
-        & solved["n"].notna()
-    ].copy()
+    """So sánh thời gian C2 trên cùng tập bài đã giải."""
+    selected = _apply_sb_filter(df, sb)
+    sat = selected[
+        (selected["method"] == "sat")
+        & (selected["solver"] == sat_solver.lower())
+        & selected["encoding"].isin(C2_ENCODING_LABELS)
+        & selected["instance"].ne("")
+        & selected["n"].gt(0)
+        & selected["n"].lt(float("inf"))
+    ]
+    encodings = set(sat["encoding"])
+    if len(encodings) < 2:
+        print(f"[Warning] Need at least two C2 encodings for {sat_solver}; skipping the C2 plot.")
+        return []
+    missing = C2_ENCODING_LABELS.keys() - encodings
+    if missing:
+        print(f"[Warning] Missing C2 data for {', '.join(sorted(missing))}.")
 
+    solved = _filter_solved(sat, cutoff=cutoff)
+    matched = solved.groupby(["n", "instance"])["encoding"].transform("nunique").eq(len(encodings))
+    sub = solved[matched].copy()
     if sub.empty:
-        print(
-            f"[Warning] Not enough SAT data ({sat_solver}, sb={sb}) to generate C2 encodings plot."
-        )
+        print("[Warning] No common instance solved by all selected encodings; skipping the C2 plot.")
         return []
 
     sub["C2 Encoding"] = sub["encoding"].map(C2_ENCODING_LABELS)
-    sub["solve_time"] = sub["solve_time"].clip(lower=MIN_LOG_TIME)
+    n_paired = len(sub[["n", "instance"]].drop_duplicates())
+    print(f"C2 means use {n_paired} shared solved instances across {sub['n'].nunique()} golfer counts.")
 
     per_instance = sub.groupby(["n", "instance", "C2 Encoding"], as_index=False)[
         "solve_time"
@@ -353,6 +442,7 @@ def plot_c2_encodings(
         .mean()
         .sort_values("n")
     )
+    agg["solve_time"] = agg["solve_time"].clip(lower=MIN_LOG_TIME)
     present_order = [enc for enc in C2_ENCODING_ORDER if enc in set(agg["C2 Encoding"])]
 
     cns.figure(width=5.6, height=3.6, unit="in", color_cycle="Science")
@@ -372,11 +462,10 @@ def plot_c2_encodings(
     ax.set_xlabel(r"Number of Golfers ($n = g \times s$)")
     ax.set_ylabel(_time_axis_label(df, mean=True))
     solver_name = _format_solver_name(sat_solver)
-    has_nonempty_sb = "sb" in sub.columns and (sub["sb"].fillna("").astype(str).str.strip() != "").any()
-    if has_nonempty_sb and sb is not None:
-        ax.set_title(f"C2 Exactly-s Encodings Comparison ({solver_name}, SB={sb})")
-    else:
-        ax.set_title(f"C2 Exactly-s Encodings Comparison ({solver_name})")
+    active_sb = df.attrs.get("benchmark_sb") or sub["sb"].iloc[0]
+    if active_sb:
+        solver_name = f"{solver_name}, SB={active_sb}"
+    ax.set_title(f"C2 Exactly-s Encodings Comparison ({solver_name})")
     ax.grid(True, which="both", linestyle="--", alpha=0.35)
     cns.take_legend_out()
 
@@ -393,14 +482,9 @@ def plot_direct_vs_order(
     cutoff: float | None = None,
 ) -> list[Path]:
     """Vẽ Bar Plot so sánh Direct và Order Encoding."""
-    solved = _filter_solved(df, cutoff=cutoff)
-    solved = _apply_sb_filter(solved, sb)
-
-    direct = solved[
-        (solved["method"] == "sat")
-        & (solved["solver"] == sat_solver.lower())
-        & ((solved["encoding"] == sat_encoding.lower()) | (solved["encoding"] == ""))
-    ].copy()
+    selected = _apply_sb_filter(df, sb)
+    solved = _filter_solved(selected, cutoff=cutoff)
+    direct = _filter_solved(_representative_sat(selected, sat_encoding, sat_solver), cutoff=cutoff)
     direct["Approach"] = f"Direct ({C2_ENCODING_LABELS.get(sat_encoding, sat_encoding)})"
 
     order = solved[
@@ -414,7 +498,7 @@ def plot_direct_vs_order(
         )
         return []
 
-    common_instances = sorted(set(direct["instance"]) & set(order["instance"]))
+    common_instances = (set(direct["instance"]) & set(order["instance"])) - {""}
     if not common_instances:
         print(
             "[Warning] No common instances between Direct and Order Encoding; skipping bar plot."
@@ -600,7 +684,7 @@ def generate_all_plots(
     output_dir: str | Path,
     sat_encoding: str = "nsc",
     sat_solver: str = "cadical",
-    sb: str = "none",
+    sb: str | None = None,
     cutoff: float | None = None,
 ) -> list[Path]:
     """Vẽ toàn bộ 3 biểu đồ chuẩn CNSPlots."""
@@ -679,14 +763,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--sb",
-        default="none",
-        help="Symmetry breaking mode filter (default: none)",
+        type=str.lower,
+        choices=("none", "sb1", "full"),
+        help="Symmetry breaking mode (defaults to benchmark metadata or none)",
     )
     parser.add_argument(
         "--cutoff",
         type=float,
         default=None,
-        help="Maximum time in seconds to count as solved (optional)",
+        help="Cutoff in seconds, applied to total time when available (defaults to recorded whole-run budget)",
     )
     parser.add_argument(
         "--time-col",
@@ -701,19 +786,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.demo:
-        df = _normalize_results_df(build_demo_dataframe(), time_col=args.time_col)
-    else:
-        df = load_results(args.input, time_col=args.time_col)
+    if args.cutoff is not None and (not isfinite(args.cutoff) or args.cutoff <= 0):
+        parser.error("--cutoff must be a finite positive number")
+    try:
+        if args.demo:
+            df = _normalize_results_df(build_demo_dataframe(), time_col=args.time_col)
+        else:
+            df = load_results(args.input, time_col=args.time_col)
 
-    saved_files = generate_all_plots(
-        df,
-        output_dir=args.output_dir,
-        sat_encoding=args.sat_encoding,
-        sat_solver=args.sat_solver,
-        sb=args.sb,
-        cutoff=args.cutoff,
-    )
+        saved_files = generate_all_plots(
+            df,
+            output_dir=args.output_dir,
+            sat_encoding=args.sat_encoding,
+            sat_solver=args.sat_solver,
+            sb=args.sb,
+            cutoff=args.cutoff,
+        )
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
 
     if saved_files:
         print("Exported CNSPlots figures:")
