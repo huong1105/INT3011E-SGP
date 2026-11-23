@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 from typing import Any, Iterable, Iterator, Mapping, Sequence, TextIO
 
 VALID_METHODS = ("sat", "order", "cp", "ilp")
@@ -330,6 +331,40 @@ def load_benchmark_csv_rows(path: str | Path) -> dict[tuple[str, ...], dict[str,
     return rows
 
 
+def replace_file_with_retry(
+    src: Path,
+    dst: Path,
+    attempts: int = 10,
+    delay: float = 0.02,
+) -> None:
+    """Đổi tên hoặc thay thế file với retry khi Windows khóa tạm thời."""
+    for attempt in range(attempts):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay * (attempt + 1))
+
+
+def read_text_with_retry(
+    path: Path,
+    encoding: str = "utf-8",
+    attempts: int = 10,
+    delay: float = 0.02,
+) -> str:
+    """Đọc nội dung text với retry khi Windows khóa tạm thời."""
+    for attempt in range(attempts):
+        try:
+            return path.read_text(encoding=encoding)
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay * (attempt + 1))
+    raise RuntimeError(f"Unreachable retry state for {path}")
+
+
 @contextmanager
 def _atomic_text_file(target: Path) -> Iterator[TextIO]:
     """Ghi file bằng cách thay thế nguyên tử."""
@@ -343,9 +378,12 @@ def _atomic_text_file(target: Path) -> Iterator[TextIO]:
             yield handle
             handle.flush()
             os.fsync(handle.fileno())
-        pending.replace(target)
+        replace_file_with_retry(pending, target)
     finally:
-        pending.unlink(missing_ok=True)
+        try:
+            pending.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def save_benchmark_csv_rows(
@@ -365,7 +403,7 @@ def set_benchmark_csv_config(
     target = Path(path)
     metadata = target.with_name(f"{target.name}.meta.json")
     if resume:
-        if not metadata.is_file() or json.loads(metadata.read_text(encoding="utf-8")) != config:
+        if not metadata.is_file() or json.loads(read_text_with_retry(metadata)) != config:
             raise ValueError("Missing or different benchmark settings in the companion .meta.json; "
                              "use a new CSV file for this benchmark")
         return

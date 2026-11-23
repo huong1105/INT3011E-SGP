@@ -20,6 +20,8 @@ from src.io_utils import (
     configure_safe_stdio,
     load_benchmark_csv_rows,
     parse_paper_instance,
+    read_text_with_retry,
+    replace_file_with_retry,
     result_to_csv_v1_row,
     save_benchmark_csv_rows,
     set_benchmark_csv_config,
@@ -254,20 +256,20 @@ def _run_case_isolated(instance, case, run_budget, num_threads, work_dir, startu
             time.sleep(0.005)
         if not start_path.exists():
             if proc.poll() == 0 and out_path.exists():
-                return json.loads(out_path.read_text(encoding="utf-8"))
+                return json.loads(read_text_with_retry(out_path))
             _kill_tree(proc)
             _, stderr = _drain(proc)
             detail = (stderr or "").strip()[-1000:]
             return {"status": "ERROR", "error": f"worker did not start: {detail}"}
 
-        started_at = float(start_path.read_text(encoding="utf-8").strip())
+        started_at = float(read_text_with_retry(start_path).strip())
         remaining = max(0.0, run_budget - (time.perf_counter() - started_at))
         try:
             _, stderr = proc.communicate(timeout=remaining)
         except subprocess.TimeoutExpired:
             elapsed = time.perf_counter() - started_at
             completed = (
-                json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else None
+                json.loads(read_text_with_retry(out_path)) if out_path.exists() else None
             )
             _kill_tree(proc)
             _drain(proc)
@@ -283,7 +285,7 @@ def _run_case_isolated(instance, case, run_budget, num_threads, work_dir, startu
             detail = (stderr or "").strip()[-1000:]
             return {"status": "ERROR",
                     "error": f"worker exited with code {proc.returncode}: {detail}"}
-        result = json.loads(out_path.read_text(encoding="utf-8"))
+        result = json.loads(read_text_with_retry(out_path))
         if result["total_time_seconds"] > run_budget:
             return {
                 "status": "TIMEOUT",
@@ -305,7 +307,7 @@ def _run_case_isolated(instance, case, run_budget, num_threads, work_dir, startu
 
 def _worker_main(spec_path, out_path):
     """Worker chạy một lượt benchmark và ghi kết quả JSON."""
-    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+    spec = json.loads(read_text_with_retry(Path(spec_path)))
     instance = {
         "label": spec["label"], "w": spec["w"], "g": spec["g"], "s": spec["s"],
     }
@@ -317,14 +319,14 @@ def _worker_main(spec_path, out_path):
         start_path = Path(spec["start_path"])
         start_temp = start_path.with_suffix(".tmp")
         start_temp.write_text(str(started), encoding="utf-8")
-        start_temp.replace(start_path)
+        replace_file_with_retry(start_temp, start_path)
         result = _execute_case(instance, case, spec["timeout_seconds"], spec["num_threads"], started)
     result.pop("model", None)
     result.pop("schedule", None)
     output = Path(out_path)
     pending = output.with_suffix(".tmp")
     pending.write_text(json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
-    pending.replace(output)
+    replace_file_with_retry(pending, output)
     return 0
 
 
