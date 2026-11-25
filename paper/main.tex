@@ -121,10 +121,7 @@
 \cortext[1]{Corresponding author (Student ID: 24021470). Group report for Course INT3011E -- Advanced Topics in Computer Science. Supervisor: Dr. To Van Khanh.}
 
 \begin{abstract}
-The Social Golfer Problem (SGP) asks whether $gs$ players can be assigned to $g$ groups of size $s$ for $w$ weeks with no repeated pair. We implement a three-index SAT model and compare four encodings of the group-size equality: New Sequential Counter, Sequential Counter, Totalizer, and Cardinality Network. We check the effect of changing only this equality encoding on CNF size and screen the four encodings with CaDiCaL~1.5.3 and Glucose~4.1. The SAT runner validates each Boolean model and its decoded schedule. In a resource-bounded screen of 528 configurations from 66 reference instances, 102 returned verified SAT and 56 were ruled out by the partner bound. The remaining configurations either timed out (106) or were skipped by the clause-count policy (264).
-The report also describes the CP-SAT and ILP baselines, the Order
-Encoding and symmetry-breaking models, and the protocol for a later
-controlled comparison of these methods.
+The Social Golfer Problem (SGP) asks whether $gs$ players can be assigned to $g$ groups of size $s$ for $w$ weeks with no repeated pair. We implement a three-index SAT model and vary only the encoding of the group-size equality, using New Sequential Counter, Sequential Counter, Totalizer, and Cardinality Network. With CaDiCaL~1.5.3 and Glucose~4.1, the SAT benchmark covers 512 configurations on 64 instances under a 60-second wall-time budget. We obtain 240 verified SAT results across 33 instances, including an instance with 153 players. The partner bound decides 56 configurations, 200 reach the time limit, and 16 exceed the resource threshold. On four structural examples, New Sequential Counter uses the fewest auxiliary variables and Sequential Counter emits the fewest clauses.
 \end{abstract}
 
 \begin{keywords}
@@ -872,23 +869,113 @@ predict search cost. The source study uses different encodings and
 symmetry settings, a different timing metric, and a much longer budget.
 We do not use its times as a baseline for speedups.
 
+\paragraph{60-second SAT benchmark protocol.}
+The shared benchmark enables 64 of the 66 source instances. The
+\texttt{11-11-12} and \texttt{13-13-14} instances are disabled in this
+configuration. For SAT we pair each instance with four C2 encodings
+and two PySAT backends, CaDiCaL~1.5.3~\cite{cadical153} and
+Glucose~4.1~\cite{audemard2018glucose}. We keep C1, C3, and the
+generation order fixed and add no symmetry clauses. The configuration
+records one thread, a 60-second total wall-time budget, and one result per
+configuration. The timer starts after benchmark-worker preparation and
+covers CNF construction, the nested SAT subprocess, and verification.
+The CSV separately records the backend's solve-only time when available.
+The metadata does not specify the host or installed package versions.
+
+The partner-bound precheck runs before CNF construction. The benchmark
+also skips configurations with more than 5{,}000{,}000 estimated C3
+clauses, a lower bound on full CNF size. This affected both backends
+and all four encodings on \texttt{9-9-10} and \texttt{19-10-2}.
+
+\paragraph{Coverage and timings.}
+Table~\ref{tab:c2-60s-outcomes} summarizes the 512 SAT configurations. Among
+them, 240 passed model and schedule verification, 56 were ruled out
+by the partner bound, 200 timed out, and 16 were skipped. No backend returned
+UNSAT. All 296 decided configurations agree with their reference
+statuses. The SAT results cover 33 distinct instances, including
+\texttt{17-9-2} with 153 players. On that instance, both backends
+solved the Totalizer CNF with 4{,}269{,}414 clauses. C3 alone accounts
+for 3{,}360{,}492 clauses in each encoding. With Sequential Counter it
+accounts for about 94\% of the total.
+
+\begin{table}[pos=!htb]
+\centering\small
+\caption{Outcomes on 64 instances per backend and encoding. Precheck denotes partner-bound UNSAT. Median total wall time is computed on the cases solved by all four encodings for the given backend.}
+\label{tab:c2-60s-outcomes}
+\begin{tabular}{llrrrrr}
+\toprule
+Backend & C2 encoding & SAT & Precheck & Timeout & Skipped & Median (s) \\
+\midrule
+CaDiCaL & NSC & 30 & 7 & 25 & 2 & 0.846 \\
+CaDiCaL & SeqCounter & 30 & 7 & 25 & 2 & 1.016 \\
+CaDiCaL & Totalizer & 30 & 7 & 25 & 2 & 1.412 \\
+CaDiCaL & Cardinality Network & 30 & 7 & 25 & 2 & 1.352 \\
+\midrule
+Glucose & NSC & 32 & 7 & 23 & 2 & 0.590 \\
+Glucose & SeqCounter & 31 & 7 & 24 & 2 & 0.574 \\
+Glucose & Totalizer & 31 & 7 & 24 & 2 & 0.659 \\
+Glucose & Cardinality Network & 26 & 7 & 29 & 2 & 0.713 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All four encodings solved the same 30 instances with CaDiCaL and
+shared 26 solved instances with Glucose. NSC had the
+lowest median total time on the CaDiCaL set and the highest SAT count
+with Glucose. Sequential Counter had the lowest median total time on
+the Glucose set. Figure~\ref{fig:c2-benchmark-runtime} shows marked
+variation by instance size for CaDiCaL. At a fixed number of players,
+the group dimensions and the number of weeks can vary. These
+measurements describe a single run per configuration, conditional on the
+time and resource limits. The timing summaries cover only instances
+solved by all four encodings with the selected backend.
+
+\begin{figure}[pos=!htb]
+    \centering
+    \includesafeimage[width=0.86\textwidth]{runtime_c2_encodings.pdf}
+    \caption{Mean total wall time by golfer count for the 30 instances
+    solved by all four C2 encodings with CaDiCaL over 17 distinct counts.
+    CNSPlots displays the means on a logarithmic time axis.}
+    \label{fig:c2-benchmark-runtime}
+\end{figure}
+
+\paragraph{Runtime breakdown.}
+Figure~\ref{fig:c2-benchmark-breakdown} compares the three largest
+instances by player count for which CaDiCaL solved all four encodings
+and recorded complete phase timings. We subtract CNF construction and
+solve-only time from total wall time to obtain the remaining time.
+This includes CNF serialization and loading, startup of the SAT
+subprocess, and model and schedule verification.
+
+On \texttt{17-9-2}, Sequential Counter emitted 3{,}578{,}670 clauses
+and took 27.33 seconds overall. NSC emitted 3{,}583{,}056 clauses and
+took 12.82 seconds. The solve phase accounts for most of the gap,
+with 15.11 seconds for Sequential Counter and 0.33 seconds for NSC.
+For NSC, the remaining time was 9.73 seconds, about 76\% of its total.
+
+\begin{figure}[pos=!htb]
+    \centering
+    \includesafeimage[width=0.92\textwidth]{runtime_c2_breakdown.pdf}
+    \caption{Runtime breakdown for four C2 encodings on the three
+    largest commonly solved CaDiCaL instances. Each bar is one run
+    with \texttt{SB=none} and a 60-second total budget.}
+    \label{fig:c2-benchmark-breakdown}
+\end{figure}
+
 \subsection{Experiment 2: Cross-Paradigm Comparison}
 \label{sec:exp2_paradigms}
 
-The comparison of SAT with CP and ILP is pending. The intended design
-uses the same case list, machine, thread policy, and whole-run wall
-budget across methods. It records build time and solver time separately
-and verifies feasible schedules with the shared verifier. Cases excluded
-by the partner bound should be reported consistently before constructing
-a solver-only cactus plot. The planned comparison includes OR-Tools
-CP-SAT and Gurobi. The assignment also lists CPLEX CP and CPLEX MIP,
-whose availability and scope still need to be confirmed.
+The shared CSV includes OR-Tools CP-SAT and Gurobi runs on the same
+64 enabled instances under the budget in Section~\ref{sec:exp1_c2}.
+The benchmark records build and solver times separately and verifies
+feasible schedules. A solver-only cactus plot excludes partner-bound
+precheck outcomes. Evaluation with CPLEX CP and CPLEX MIP remains open.
 
 \subsection{Experiment 3: Order Encoding and Symmetry Breaking}
 \label{sec:exp3_order_sb}
 
-This comparison is pending a controlled run of the Order Encoding and
-symmetry variants. To separate the effect of representation from the
+The shared CSV includes Order Encoding with both PySAT backends at
+\texttt{SB=none}. Runs with other symmetry settings remain open. To separate the effect of representation from the
 effect of symmetry breaking, the comparison should use the same backend,
 instances and budget for three-index SAT and Order Encoding, then vary
 the verified symmetry restrictions within each representation. The
@@ -904,23 +991,34 @@ trade-off between auxiliary variables and clauses: in the four
 structural examples, NSC uses the fewest auxiliary variables and
 Sequential Counter emits the fewest clauses.
 The SAT screen confirmed 102 satisfiable configurations across 15 distinct instances. All decided cases agreed with the known source statuses. A larger evaluation requires resources to build the skipped formulas and a longer time budget for undecided runs.
+The 60-second shared benchmark also confirmed 240 satisfiable SAT
+configurations across 33 instances.
 The ILP baseline, Order Encoding, and symmetry breaking are implemented
 and described in Sections~\ref{sec:ilp_formulation},
 \ref{sec:order_encoding}, and~\ref{sec:symmetry_breaking}; their
 controlled comparison with the SAT encodings and with exact CP still
-requires a common experimental protocol.
+requires additional controlled runs for the symmetry variants.
 
 \section*{Group Contributions and Acknowledgments}
 This project is a collaboration among three students for course INT3011E (Advanced Topics in Computer Science) at VNU University of Engineering and Technology under the supervision of Dr.~To Van Khanh:
 \begin{itemize}[noitemsep]
     \item \textbf{Do Huy Hieu (Member 1)}: Universal Solution Verifier, schedule display, shared CLI and DIMACS exporter, OR-Tools CP-SAT model, \texttt{cnsplots} visualization, and paper editing (Abstract, Introduction, CP formulation, Experiments, Conclusion).
-    \item \textbf{Pham Van Huong (Member 2)}: Three-index one-hot SAT encoding, custom NSC and PySAT \textit{Exactly}-$s$ encodings, isolated PySAT solver runner, dependencies, SAT methodology, and the SAT-only screening experiments.
+    \item \textbf{Pham Van Huong (Member 2)}: Three-index one-hot SAT encoding, custom NSC and PySAT \textit{Exactly}-$s$ encodings, isolated PySAT solver runner, dependencies, SAT methodology, the SAT-only screening experiments, and the C2 benchmark analysis.
     \item \textbf{Nguyen Minh Son (Member 3)}: Order Encoding, ILP formulation, symmetry-breaking module, automated benchmark suite, and ILP/Order/Symmetry sections.
 \end{itemize}
 We gratefully acknowledge Dr.~To Van Khanh for his guidance, lectures, and reference research on SGP and Order Encoding.
 
 \section*{Data and Code Availability}
-The project repository is \url{https://github.com/huong1105/INT3011E-SGP}. The SAT screening CSV, per-configuration JSON records, and environment metadata accompany the working copy. The final reproducibility archive is pending.
+The source code is available in the
+\href{https://github.com/huong1105/INT3011E-SGP}{project repository}.
+The benchmark results, configuration metadata, and original benchmark
+figures are archived with
+\href{https://github.com/huong1105/INT3011E-SGP/tree/aa79113f10b16858e2613cbc830e9752591afa97}{commit \texttt{aa79113}}.
+The input list, result CSV, and its metadata are
+\path{benchmarks/benchmark_instances.csv},
+\path{benchmarks/results.csv}, and \path{benchmarks/results.csv.meta.json}.
+The figure-generation script is \path{benchmarks/plot_cns.py}, which also
+builds Figure~\ref{fig:c2-benchmark-breakdown} from the saved CSV.
 
 \begin{thebibliography}{99}
 \small

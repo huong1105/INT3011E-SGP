@@ -1,18 +1,18 @@
-# Social Golfer Problem — SAT Solver
+# Social Golfer Problem (SGP)
 
-Phần SAT của BTL2 môn Các vấn đề hiện đại trong KHMT, VNU-UET.
-Code cung cấp bộ sinh CNF và runner độc lập để tích hợp với các phần của nhóm.
+BTL2 môn Các vấn đề hiện đại trong KHMT, VNU-UET. Dự án so sánh SAT
+one-hot ba chỉ số, SAT Order Encoding, OR-Tools CP-SAT và Gurobi ILP.
 
 ## Mô hình và encoding
 
-API nhận `SGP(w, g, s)`: `w` tuần, `g` nhóm mỗi tuần, `s` người mỗi nhóm;
-tổng số người là `g * s`. Nhãn `(g,p,w)` trong bài nguồn tương ứng `s=p`.
+API nhận `SGP(w, g, s)` với `w` tuần, `g` nhóm mỗi tuần và `s` người mỗi
+nhóm. Tổng số người là `n = g * s`. Nhãn `g-p-w` trong bài nguồn dùng
+`p = s`, nên `2-2-3` tương ứng `SGP(3, 2, 2)`.
 
-Mô hình dùng biến one-hot ba chỉ số theo NSE:
-
-- C1: mỗi người thuộc đúng một nhóm mỗi tuần, bằng ALO và pairwise AMO.
-- C2: mỗi nhóm có đúng `s` người, chọn một trong bốn encoding bên dưới.
-- C3: mỗi cặp người gặp nhau nhiều nhất một lần, bằng clause bốn literal âm.
+Mô hình one-hot ba chỉ số dựa trên phần ràng buộc cơ bản của NSE. C1 dùng
+ALO và pairwise AMO để xếp mỗi người vào đúng một nhóm mỗi tuần. C2 dùng
+Exactly-`s` để cố định kích thước nhóm. C3 dùng các mệnh đề bốn literal âm
+để cấm một cặp gặp nhau nhiều lần. Bốn cấu hình chỉ thay cách mã hóa C2.
 
 | `encoding` | Bộ mã hóa C2 |
 | --- | --- |
@@ -21,8 +21,8 @@ Mô hình dùng biến one-hot ba chỉ số theo NSE:
 | `totalizer` | Totalizer |
 | `cardnetwrk` | Cardinality Network |
 
-Symmetry breaking được truyền riêng qua `symmetry_clauses`; bộ sinh không tự
-thêm ràng buộc symmetry của các module khác.
+Có thể truyền ràng buộc phá đối xứng qua `symmetry_clauses` bằng ID của
+các biến chính (`1..n*g*w`).
 
 ## Cài đặt
 
@@ -34,8 +34,8 @@ python -m venv .venv
 python -m pip install -r requirements-sat.txt
 ```
 
-Trên Linux/macOS, kích hoạt bằng `source .venv/bin/activate`. File
-`requirements.txt` cài thêm dependency cho các phần khác của dự án.
+Trên Linux/macOS, kích hoạt bằng `source .venv/bin/activate`. Để chạy
+benchmark chung và vẽ biểu đồ, cài `python -m pip install -r requirements.txt`.
 
 ## Chạy SAT
 
@@ -44,8 +44,13 @@ python -m src.sat_runner -w 3 -g 2 -s 2 --encoding nsc --solver cadical --timeou
 python -m src.sat_runner -w 3 -g 2 -s 2 --encoding totalizer --solver cadical --timeout 10 --json
 ```
 
-Hai solver: `cadical` (CaDiCaL 1.5.3) và `glucose` (Glucose 4.1). CLI SAT chạy trực tiếp bằng `src.sat_runner`.
-Mặc định CLI dùng `nsc`, `cadical` và timeout backend 60 giây.
+CLI độc lập dùng PySAT với `cadical` (CaDiCaL 1.5.3) hoặc `glucose`
+(Glucose 4.1). Mặc định là `nsc`, `cadical` và timeout backend 60 giây.
+Có thể xuất DIMACS qua CLI chung của nhóm.
+
+```powershell
+python main.py -w 3 -g 2 -s 2 --method sat --amo nsc --solver cadical --export-cnf output/example.cnf
+```
 
 ## Dùng trong code của nhóm
 
@@ -60,34 +65,52 @@ if result["status"] == "SAT":
     # schedule[week][group] là danh sách player; tất cả chỉ số bắt đầu từ 0.
 ```
 
-Kết quả phân biệt `SAT`, `UNSAT`, `TIMEOUT`, `UNAVAILABLE`, `ERROR`.
-Runner kiểm tra model CNF và lịch SGP trước khi trả SAT có `verified=True`.
-`timeout_seconds` giới hạn khởi động backend, nạp CNF và solve; thời gian
-sinh CNF được ghi riêng trong `encode_time_seconds`. API mặc định không đặt timeout.
+Kết quả phân biệt `SAT`, `UNSAT`, `TIMEOUT`, `UNAVAILABLE` và `ERROR`.
+Một kết quả SAT hợp lệ có `model_verified=True`, `verified=True` và `schedule`.
+Với `s > 1`, nếu `w * (s - 1) > n - 1` thì API trả `UNSAT` với
+`backend_type="precheck"` trước khi gọi solver. CSV benchmark dùng trạng thái
+`UNSAT_PRECHECK` cho trường hợp này.
+
+`timeout_seconds` trong API giới hạn thời gian backend khởi động, nạp CNF
+và giải. API mặc định không đặt timeout. `encode_time_seconds` đo thời gian
+sinh CNF, `wall_time_seconds` đo wall time của backend,
+`solver_wall_time_seconds` đo riêng bước giải và `total_time_seconds` đo quá
+trình sinh, giải và kiểm chứng. `cpu_time_seconds` có giá trị khi worker đo được.
 
 Nếu chỉ cần CNF, dùng `encode_sgp(w, g, s, encoding=...)` trong
 `src.sat_direct_encoders`; hàm trả `(clauses, num_vars, stats)`.
 Nếu đã có CNF, gọi `solve_cnf(clauses, solver=..., timeout_seconds=...)`
 trong `src.sat_runner`.
 
+Chạy `python -m unittest discover -s tests -v` để kiểm thử bộ mã hóa và runner.
+
 ## Benchmark so sánh
 
-Cài các dependency trong `requirements.txt` và dùng giấy phép Gurobi đã cấu hình
-để chạy đủ bốn phương pháp. Một thành viên chạy lệnh sau từ thư mục gốc:
+Lượt benchmark đã lưu dùng 64 bài được bật trong danh sách đầu vào, `--sb none`,
+một luồng và ngân sách 60 giây mỗi cấu hình. Đồng hồ của worker bắt đầu sau
+khi nạp module của phương pháp và khởi tạo môi trường Gurobi cho ILP, rồi
+tính từ dựng mô hình đến kiểm chứng. Giới hạn tài nguyên cho SAT/Order dựa
+trên ước lượng số mệnh đề C3.
+[Danh sách đầu vào](benchmarks/benchmark_instances.csv) · [CSV kết quả](benchmarks/results.csv) · [Metadata](benchmarks/results.csv.meta.json)
+
+Trong 768 dòng kết quả, 512 dòng là SAT one-hot (`64 bài × 4 encoding × 2 solver`).
+Nhánh này có 240 cấu hình tìm được lịch hợp lệ trên 33 bài, 56 `UNSAT_PRECHECK`,
+200 `TIMEOUT` và 16 `SKIPPED_RESOURCE_LIMIT`. Hai trạng thái cuối biểu thị các
+cấu hình chưa đưa ra quyết định SAT/UNSAT.
+
+Để chạy lại đủ bốn phương pháp, cài dependency chung, cấu hình giấy phép
+Gurobi và ghi vào một file mới. Giữ `.meta.json` cạnh CSV để tiếp tục bằng
+`--resume` với cùng cấu hình.
 
 ```powershell
-python -m benchmarks.run_all --output benchmarks/results.csv --resume
+python -m benchmarks.run_all --instances benchmarks/benchmark_instances.csv --output output/benchmark_reproduction/results.csv --sb none --run-budget 60 --threads 1 --resume
 ```
 
-Lượt đo mặc định dùng cùng bộ bài được bật, SB `none`, một luồng và giới hạn
-60 giây từ dựng mô hình đến kiểm chứng. Worker nạp thư viện và khởi tạo Gurobi
-trước khi tính giờ. Người chạy giữ `results.csv.meta.json` cạnh CSV để tiếp tục
-bằng `--resume`. Nếu đổi cấu hình hoặc CSV cũ thiếu metadata, dùng đường dẫn
-đầu ra mới.
-
-Sau khi chạy xong, nhóm dùng chung một file `results.csv` để làm bảng và vẽ biểu
-đồ. Khi chỉ nhận CSV của đợt đo mặc định, chạy:
+Để dựng lại biểu đồ CNSPlots từ dữ liệu đã lưu, chạy lệnh dưới đây. Các biểu
+đồ dùng `total_time_seconds` và ngân sách ghi trong metadata.
 
 ```powershell
-python -m benchmarks.plot_cns --input benchmarks/results.csv --cutoff 60
+python -m benchmarks.plot_cns --input benchmarks/results.csv --output-dir output/benchmark_reproduction/figures
 ```
+
+Mô hình SAT, công thức đếm CNF và phần thực nghiệm nằm trong [báo cáo LaTeX](paper/main.tex).

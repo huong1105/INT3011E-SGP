@@ -472,6 +472,79 @@ def plot_c2_encodings(
     return _save_both_formats(Path(output_dir), "runtime_c2_encodings")
 
 
+def plot_c2_runtime_breakdown(
+    df: pd.DataFrame,
+    output_dir: str | Path,
+    sat_solver: str = "cadical",
+    sb: str | None = None,
+    cutoff: float | None = None,
+) -> list[Path]:
+    """Phân rã thời gian của ba instance lớn nhất có đủ kết quả SAT ở cả bốn mã hóa."""
+    phase_columns = ("encode_time_seconds", "solver_wall_time_seconds", "total_time_seconds")
+    resolved = [_resolve_column(df, (column,)) for column in phase_columns]
+    if None in resolved:
+        print("[Warning] Skipping the C2 runtime breakdown because phase timings are missing.")
+        return []
+
+    selected = _apply_sb_filter(df, sb)
+    sat = selected.loc[
+        selected["method"].eq("sat")
+        & selected["solver"].eq(sat_solver.lower())
+        & selected["status"].eq("SAT")
+        & selected["encoding"].isin(C2_ENCODING_LABELS)
+        & selected["instance"].ne("")
+        & selected["n"].gt(0)
+        & selected["n"].lt(float("inf"))
+    ].copy()
+    timing_names = ["build_time", "solver_time", "total_time"]
+    sat[timing_names] = sat[resolved].apply(pd.to_numeric, errors="coerce")
+    sat["solve_time"] = sat["total_time"]
+    sat = _filter_solved(sat, cutoff=cutoff)
+    timings = sat[timing_names]
+    complete = timings.ge(0).all(axis=1) & timings.lt(float("inf")).all(axis=1)
+    remaining = sat["total_time"] - sat["build_time"] - sat["solver_time"]
+    tolerance = sat["total_time"].mul(1e-9).clip(lower=1e-9)
+    sat = sat.loc[complete & remaining.ge(-tolerance)].copy()
+    sat["remaining_time"] = remaining.clip(lower=0)
+
+    encoding_counts = sat.groupby(["n", "instance"])["encoding"].transform("nunique")
+    matched = encoding_counts.eq(len(C2_ENCODING_LABELS))
+    data = sat.loc[matched]
+    if data.empty:
+        print("[Warning] Skipping the C2 runtime breakdown because no SAT instance has all four timings.")
+        return []
+
+    instances = data[["n", "instance"]].drop_duplicates().sort_values(["n", "instance"]).tail(3)
+    print(f"C2 runtime breakdown uses {sat_solver}: {', '.join(instances['instance'])}.")
+
+    phases = (
+        ("build_time", "CNF construction", "#2f7d80"),
+        ("solver_time", "SAT solve", "#d78931"),
+        ("remaining_time", "Remaining time", "#a9bdd0"),
+    )
+    positions = range(len(C2_ENCODING_LABELS))
+    fig = cns.figure(width=6.0, height=2.65, unit="in")
+    axes = fig.subplots(1, len(instances), sharey=True, squeeze=False)[0]
+    for ax, (n, instance) in zip(axes, instances.itertuples(index=False, name=None)):
+        case = data.loc[data["n"].eq(n) & data["instance"].eq(instance)]
+        case = case.set_index("encoding").reindex(C2_ENCODING_LABELS)
+        bottom = pd.Series(0.0, index=case.index)
+        for column, label, color in phases:
+            ax.bar(positions, case[column], bottom=bottom, color=color, width=0.67, label=label)
+            bottom += case[column]
+        ax.set_title(f"{instance} ({n:g} players)", fontsize=10, pad=9)
+        ax.set_xticks(positions, ["NSC", "Seq.\nCounter", "Totalizer", "Card.\nNetwork"], fontsize=8)
+        ax.set_axisbelow(True)
+        ax.grid(axis="y", color="#dde3eb", linewidth=0.6)
+
+    axes[0].set_ylim(bottom=0)
+    axes[0].set_ylabel("Total wall time (s)")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncols=3, frameon=False)
+    fig.subplots_adjust(left=0.1, right=0.98, bottom=0.19, top=0.76, wspace=0.18)
+    return _save_both_formats(Path(output_dir), "runtime_c2_breakdown")
+
+
 def plot_direct_vs_order(
     df: pd.DataFrame,
     output_dir: str | Path,
@@ -687,7 +760,7 @@ def generate_all_plots(
     sb: str | None = None,
     cutoff: float | None = None,
 ) -> list[Path]:
-    """Vẽ toàn bộ 3 biểu đồ chuẩn CNSPlots."""
+    """Vẽ các biểu đồ CNSPlots tương ứng với dữ liệu benchmark."""
     saved: list[Path] = []
     saved.extend(
         plot_cactus(
@@ -701,6 +774,15 @@ def generate_all_plots(
     )
     saved.extend(
         plot_c2_encodings(
+            df,
+            output_dir,
+            sat_solver=sat_solver,
+            sb=sb,
+            cutoff=cutoff,
+        )
+    )
+    saved.extend(
+        plot_c2_runtime_breakdown(
             df,
             output_dir,
             sat_solver=sat_solver,
@@ -736,7 +818,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Chạy CLI vẽ biểu đồ CNSPlots."""
     _configure_safe_stdio()
     parser = argparse.ArgumentParser(
-        description="Generate SGP publication figures with CNSPlots (Cactus, Runtime Line, Bar)"
+        description="Generate SGP publication figures with CNSPlots"
     )
     parser.add_argument(
         "--input",
