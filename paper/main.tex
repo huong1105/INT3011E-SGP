@@ -110,8 +110,8 @@
 \author[1]{Pham Van Huong}
 \ead{24021510@vnu.edu.vn}
 
-\author[1]{[Member 3 Full Name]}
-\ead{[member3]@vnu.edu.vn}
+\author[1]{Nguyen Minh Son}
+\ead{24021614@vnu.edu.vn}
 
 \affiliation[1]{organization={Faculty of Information Technology, VNU University of Engineering and Technology},
             addressline={144 Xuan Thuy, Cau Giay},
@@ -122,7 +122,9 @@
 
 \begin{abstract}
 The Social Golfer Problem (SGP) asks whether $gs$ players can be assigned to $g$ groups of size $s$ for $w$ weeks with no repeated pair. We implement a three-index SAT model and compare four encodings of the group-size equality: New Sequential Counter, Sequential Counter, Totalizer, and Cardinality Network. We check the effect of changing only this equality encoding on CNF size and screen the four encodings with CaDiCaL~1.5.3 and Glucose~4.1. The SAT runner validates each Boolean model and its decoded schedule. In a resource-bounded screen of 528 configurations from 66 reference instances, 102 returned verified SAT and 56 were ruled out by the partner bound. The remaining configurations either timed out (106) or were skipped by the clause-count policy (264).
-The report also describes the CP-SAT baseline and the protocol for a later controlled comparison with Order Encoding, symmetry breaking, and exact CP and MIP solvers.
+The report also describes the CP-SAT and ILP baselines, the Order
+Encoding and symmetry-breaking models, and the protocol for a later
+controlled comparison of these methods.
 \end{abstract}
 
 \begin{keywords}
@@ -153,8 +155,8 @@ In the literature, standard SGP instances are labeled by the triple $g\text{-}p\
 This report presents an implementation and initial evaluation of the three-index SAT model, along with the CP-SAT baseline. Our main contributions are summarized as follows:
 \begin{enumerate}[label=(\arabic*),noitemsep]
     \item \textbf{Controlled Ablation of \textit{Exactly}-$s$ Cardinality Encodings}: Adopting the three-index one-hot Boolean representation with fixed group-assignment (C1) and unique-pairing (C3) constraints, we systematically compare four Group Size (C2) encodings---NSC \cite{kieu2025nse}, Sequential Counter \cite{sinz2005towards}, Totalizer \cite{bailleux2003totalizer}, and Cardinality Network \cite{asin2009cardnet}---across two CDCL solvers (CaDiCaL~1.5.3 and Glucose~4.1).
-    \item \textbf{Order Encoding and Symmetry Breaking}: We outline Order Encoding~\cite{tamura2009order} and static symmetry breaking (SB1 and SB2)~\cite{kieu2025nse} for a follow-up comparison.
-    \item \textbf{Exact Baselines}: We implement a CP-SAT model in Google OR-Tools using \texttt{AllDifferent}, \texttt{Inverse}, and \texttt{AtMostOne}, and specify an ILP formulation for a subsequent comparison on common instances.
+    \item \textbf{Order Encoding and Symmetry Breaking}: We implement Order Encoding~\cite{tamura2009order} and static symmetry breaking (SB1 and SB2)~\cite{kieu2025nse} and describe their formulations for a follow-up comparison.
+    \item \textbf{Exact Baselines}: We implement a CP-SAT model in Google OR-Tools using \texttt{AllDifferent}, \texttt{Inverse}, and \texttt{AtMostOne}, and implement an ILP model for a subsequent comparison on common instances.
     \item \textbf{Unified Pipeline and Independent Verification}: We provide a common CLI, DIMACS CNF exporter, partner-bound precheck, and a shared verifier for the three SGP constraints.
 \end{enumerate}
 
@@ -237,8 +239,8 @@ This yields $w n$ slot variables, $w n$ inverse variables, $w n$ group variables
 \subsection{Integer Linear Programming (ILP) Formulation}
 \label{sec:ilp_formulation}
 
-% [TV3: Review and expand Section 2.3 to match src/ilp_solver.py once implemented]
-In Integer Linear Programming \cite{gurobi}, the SGP is formulated using binary assignment variables $x_{i,j,k} \in \{0, 1\}$, where $x_{i,j,k} = 1$ if player $i \in P$ is assigned to group $j \in J$ in week $k \in K$, and $0$ otherwise. To linearize the quadratic co-occurrence condition $x_{i_1,j,k} \cdot x_{i_2,j,k}$, auxiliary continuous or binary variables $y_{i_1,i_2,j,k} \in [0, 1]$ are introduced for each pair $0 \le i_1 < i_2 < n$, group $j \in J$, and week $k \in K$:
+% [TV3] The ILP description follows the implemented model in src/ilp_solver.py.
+In Integer Linear Programming \cite{gurobi}, the SGP is formulated using binary assignment variables $x_{i,j,k} \in \{0, 1\}$, where $x_{i,j,k} = 1$ if player $i \in P$ is assigned to group $j \in J$ in week $k \in K$, and $0$ otherwise. To linearize the quadratic co-occurrence condition $x_{i_1,j,k} \cdot x_{i_2,j,k}$, auxiliary continuous variables $y_{i_1,i_2,j,k} \in [0, 1]$ are introduced for each pair $0 \le i_1 < i_2 < n$, group $j \in J$, and week $k \in K$:
 \begin{align}
     \text{find} \quad & x_{i,j,k} \in \{0, 1\},\ \ 0 \le y_{i_1,i_2,j,k} \le 1 \label{eq:ilp_vars} \\
     \text{s.t.} \quad & \sum_{j=0}^{g-1} x_{i,j,k} = 1 && \forall i \in P,\ k \in K \quad \text{(C1)}, \label{eq:ilp_c1} \\
@@ -249,7 +251,18 @@ In Integer Linear Programming \cite{gurobi}, the SGP is formulated using binary 
                           && i_1<i_2,\ j \in J,\ k \in K, \notag\\
                       & \sum_{k=0}^{w-1} \sum_{j=0}^{g-1} y_{i_1,i_2,j,k} \le 1 && \forall i_1 < i_2 \quad \text{(C3)}. \label{eq:ilp_c3}
 \end{align}
-Note that the non-negativity bound $y_{i_1,i_2,j,k} \ge 0$ is mandatory so that negative $y$ values cannot artificially cancel positive meetings in Equation~(\ref{eq:ilp_c3}). The solver configuration and measurements will be reported with the ILP implementation.
+The model has no objective: Gurobi is asked only for a feasible schedule. The continuous auxiliary variables are exact for this formulation. Constraints~\eqref{eq:ilp_lin} force $y_{i_1,i_2,j,k}=1$ whenever the two players share group $j$ in week $k$, and every constraint that uses $y$ bounds a sum of $y$ from above. Given a feasible pair $(x,y)$, replacing each $y_{i_1,i_2,j,k}$ by $x_{i_1,j,k}x_{i_2,j,k}$ keeps all constraints satisfied, so integrality of $y$ is unnecessary and the branch-and-cut search never branches on these variables.
+
+\paragraph{Model size.} Without symmetry-breaking constraints, the model contains $ngw$ binary and $\binom{n}{2}gw$ continuous variables, and
+\begin{equation}
+    C_{\mathrm{ILP}} = nw + gw + 3\binom{n}{2}gw + \binom{n}{2}
+    \label{eq:ilp_size}
+\end{equation}
+linear constraints: the $nw$ assignment equalities~\eqref{eq:ilp_c1}, the $gw$ group-size equalities~\eqref{eq:ilp_c2}, the three inequalities~\eqref{eq:ilp_lin} for every $y$, and the $\binom{n}{2}$ meeting constraints~\eqref{eq:ilp_c3}. For instance, \texttt{3-2-2} ($w=2$, $g=3$, $s=2$, $n=6$) gives $36$ binary variables, $90$ continuous variables, and $303$ constraints, which agrees with the model reported by Gurobi.
+
+\paragraph{Symmetry breaking.} The optional \texttt{--sb} modes add the unit constraints of Section~\ref{sec:symmetry_breaking} to the same model: \texttt{sb1} fixes the first week, and \texttt{full} also fixes the first $\min(g,s)$ players in later weeks. These rows are linear equalities $x_{i,j,k}=1$ and are counted separately from~\eqref{eq:ilp_size}.
+
+\paragraph{Precheck, statuses, and timing.} The partner bound~\eqref{eq:partner_bound} is evaluated before a model is built, so a bound-violating instance returns \texttt{UNSAT} without a Gurobi call. A single Gurobi environment is created with output disabled and reused; dual reductions are disabled so that an infeasible model receives a definitive \texttt{INFEASIBLE} status instead of \texttt{INF\_OR\_UNBD}. The time limit and the thread count are set on the model. An optimal solution is decoded and passed through the shared verifier. \texttt{INFEASIBLE} maps to \texttt{UNSAT}; when the time limit is reached, a verified incumbent is retained as \texttt{SAT} and otherwise the run is reported as \texttt{TIMEOUT}; a missing license or an exceeded size limit is reported as \texttt{UNAVAILABLE}. Model-construction time, Gurobi's reported solve time, process CPU time, and whole-run wall time are recorded separately.
 
 \section{SAT-Based Approaches}
 \label{sec:sat_approach}
@@ -534,23 +547,217 @@ only primary literals. The added clauses are counted separately.
 \subsection{Order Encoding}
 \label{sec:order_encoding}
 
-% [TV3: Complete Section 3.3 once src/order_encoder.py is finalized]
-As an alternative representation, Order Encoding \cite{tamura2009order} models each slot's assigned golfer as an integer variable $P_{w,g,c} \in \{1, \ldots, n\}$ encoded via monotone Boolean order variables $B_{w,g,c,v} \iff (P_{w,g,c} \le v)$ for $v \in \{1, \ldots, n - 1\}$, linked by the axiom clauses $(\neg B_{w,g,c,v} \vee B_{w,g,c,v+1})$. The implementation must specify its weekly assignment, group ordering, and pair uniqueness encodings before comparison.
+Order Encoding \cite{tamura2009order} replaces the one-hot membership
+variables of Section~\ref{sec:sat_model} by an integer slot value and a
+unary representation of that value. The model is implemented in
+\path{src/order_encoder.py}; it is a slot-based model and shares the
+$(w,g,s)$ API, the partner-bound precheck, and the standalone verifier
+with the direct model.
+
+\paragraph{Variables.}
+Let $K=\{0,\ldots,w-1\}$, $J=\{0,\ldots,g-1\}$,
+$C=\{0,\ldots,s-1\}$, and $V=\{1,\ldots,n\}$ with $n=gs$. Each group has
+$s$ ordered slots. The integer variable $P_{k,j,c}\in V$ is the player
+in slot $c$ of group $j$ in week $k$. For $n>1$, it is represented by
+monotone Boolean variables
+\begin{equation}
+ B_{k,j,c,v}\ \Longleftrightarrow\ (P_{k,j,c}\le v),
+ \qquad 1\le v\le n-1.
+ \label{eq:order-meaning}
+\end{equation}
+The value $n$ is represented by all $B_{k,j,c,v}$ false and the value
+$1$ by all of them true. The model contains $wgs(n-1)$ order variables;
+the case $n=1$ is trivial and emits no clauses.
+
+\paragraph{Order axiom.}
+Every threshold implies the next one:
+\begin{equation}
+ \neg B_{k,j,c,v}\lor B_{k,j,c,v+1},
+ \qquad 1\le v\le n-2.
+ \label{eq:order-chain}
+\end{equation}
+This is the only constraint that links the $n-1$ thresholds of one slot.
+
+\paragraph{Strict slot order.}
+Within a group, slots are kept in increasing player order. For
+$X=P_{k,j,c}$ and $Y=P_{k,j,c+1}$ with $c<s-1$, the clauses
+\begin{align}
+ &\neg B_{k,j,c+1,1},\qquad B_{k,j,c,n-1}, \label{eq:order-strict-bounds}\\
+ &\neg B_{k,j,c+1,v}\lor B_{k,j,c,v-1},
+ \qquad 2\le v\le n-1 \label{eq:order-strict}
+\end{align}
+encode $X<Y$: the first two clauses give $Y\ge 2$ and $X\le n-1$, and
+\eqref{eq:order-strict} is the contrapositive of
+$(Y\le v)\Rightarrow(X\le v-1)$. Sorting the players of a group is
+always possible, so this canonical order does not remove solutions.
+
+\paragraph{Weekly assignment.}
+C2 holds by construction, because each group has exactly $s$ slots. For
+C1, every player must occupy exactly one slot in each week. The encoding
+counts, for each threshold $v$, how many slots satisfy
+$P_{k,j,c}\le v$:
+\begin{equation}
+ \sum_{j\in J}\sum_{c\in C} B_{k,j,c,v} = v,
+ \qquad 1\le v\le n-1.
+ \label{eq:order-alldiff}
+\end{equation}
+Each equality is compiled by PySAT's sequential counter
+(\texttt{CardEnc.equals} with \texttt{EncType.seqcounter}); these are the
+only auxiliary variables of the model. Let $c_v$ be the number of slots
+with value at most $v$. Equation~\eqref{eq:order-alldiff} states
+$c_v=v$, so $c_v-c_{v-1}=1$ for every $v$, with $c_0=0$ and $c_n=n$.
+Hence the $gs$ slots carry the values $1,\ldots,n$ exactly once, which
+is C1 for the week.
+
+\paragraph{Membership channeling.}
+C3 is expressed over membership indicators $e_{k,i,j}$, where
+$e_{k,i,j}=1$ means that player $i$ is in group $j$ in week $k$. The
+slot value implies membership:
+\begin{equation}
+ P_{k,j,c}=i\ \longrightarrow\ e_{k,i,j}.
+ \label{eq:order-channel}
+\end{equation}
+At the clause level this is
+\begin{align}
+ &\neg B_{k,j,c,1}\lor e_{k,1,j}, \qquad
+   B_{k,j,c,n-1}\lor e_{k,n,j}, \label{eq:order-channel-ends}\\
+ &\neg B_{k,j,c,v}\lor B_{k,j,c,v-1}\lor e_{k,v,j},
+   \qquad 2\le v\le n-1, \label{eq:order-channel-mid}
+\end{align}
+for the cases $i=1$, $i=n$, and $2\le i\le n-1$, respectively.
+Because slots increase strictly, slot $c$ can only hold values
+$c+1,\ldots,n-s+c+1$, so only those clauses are emitted. The implication
+is one-directional, which is sufficient: C3 uses $e$ only negatively,
+and every actual membership forces $e=1$, so unused indicators can
+always be set to $0$. The $e$ variables contribute $wng$ bits.
+
+\paragraph{No repeated pair.}
+For $i_1<i_2$, weeks $k_1<k_2$, and groups $j_1,j_2$ (which may
+coincide),
+\begin{equation}
+ \neg e_{k_1,i_1,j_1}\lor\neg e_{k_1,i_2,j_1}\lor
+ \neg e_{k_2,i_1,j_2}\lor\neg e_{k_2,i_2,j_2}.
+ \label{eq:order-c3}
+\end{equation}
+The clause forbids exactly the case in which the two players share group
+$j_1$ in week $k_1$ and group $j_2$ in week $k_2$.
+
+\paragraph{Size.}
+For $n>1$ and without symmetry clauses, the model uses
+\begin{equation}
+ V_{\mathrm{ord}} = wgs(n-1)+wng
+ \label{eq:order-vars}
+\end{equation}
+variables before the cardinality auxiliaries, and the clause groups
+contribute
+\begin{equation}
+ C_{\mathrm{ord}} = wgs(n-2)+wg(s-1)n+wgs(n-s+1)
+   +\binom{w}{2}g^2\binom{n}{2}
+ \label{eq:order-clauses}
+\end{equation}
+clauses from \eqref{eq:order-chain}, \eqref{eq:order-strict}, the
+channeling clauses, and \eqref{eq:order-c3}, respectively. The
+$w(n-1)$ threshold equalities add sequential-counter auxiliaries whose
+count depends on $v$ and $gs$; the implementation reports the measured
+totals rather than estimating them. The SB1 variant of
+Section~\ref{sec:symmetry_breaking} adds $gs(n-1)$ further unit clauses.
+
+\paragraph{Correctness and decoding.}
+Given \eqref{eq:order-chain}, the truth values of
+$B_{k,j,c,\cdot}$ define a unique value $P_{k,j,c}$: the smallest $v$
+with $B_{k,j,c,v}$ true, or $n$ when no threshold is true.
+Equation~\eqref{eq:order-alldiff} makes the values a permutation of $V$
+in each week and the strict-order clauses fix the slot order, so C1 and
+C2 hold. Equation~\eqref{eq:order-c3}, together with
+\eqref{eq:order-channel}, forbids repeated meetings. Conversely, any
+valid schedule becomes a model of the encoding after sorting each
+group, setting the thresholds, and setting $e$ on the memberships. The
+decoder therefore returns the schedule from the slot values, and the
+shared verifier checks C1--C3 again.
 
 \subsection{Symmetry Breaking Constraints}
 \label{sec:symmetry_breaking}
 
-% [TV3: Complete Section 3.4 once src/symmetry.py is finalized]
-Static symmetry breaking reduces redundant isomorphic search spaces via unit clauses over primary variables \cite{kieu2025nse}: \textbf{SB1} fixes week~1 in canonical lexicographical order, and \textbf{SB2} fixes the first $\min(g, s)$ players to distinct groups $0, \ldots, \min(g,s)-1$ for weeks $k \ge 1$. The SAT screen uses \texttt{SB=none}. The follow-up experiment will record the clauses actually used.
+Every SGP instance is invariant under three families of label
+permutations: a global relabeling of players, an independent relabeling
+of groups within each week, and a permutation of the weeks. Isomorphic
+copies of the same schedule can dominate the search space, and a CDCL
+solver may explore many of them. Static symmetry breaking (SB) removes
+part of this redundancy with unit clauses over primary
+variables~\cite{kieu2025nse,walsh2006symmetry}. The implementation in
+\path{src/symmetry.py} generates these clauses for the SAT encoders; the
+CP-SAT and ILP models add the same restrictions directly.
+
+\paragraph{SB1: canonical first week.}
+For $j\in[1,g]$ and $c\in[1,s]$,
+\begin{equation}
+ x_{(j-1)s+c,\,j,\,1}=1.
+ \label{eq:sb1}
+\end{equation}
+Week~1 is partitioned into the consecutive blocks
+$\{1,\ldots,s\}$, $\{s+1,\ldots,2s\}$, \ldots, and block $j$ is assigned
+to group $j$. Equation~\eqref{eq:sb1} uses $gs$ unit clauses and fixes
+the player and group labels of the first week.
+
+\paragraph{SB2: fixed players in later weeks.}
+For every week $t\ge 2$ and every player $i\le\min(g,s)$,
+\begin{equation}
+ x_{i,i,t}=1.
+ \label{eq:sb2}
+\end{equation}
+SB2 pins player $i$ to group $i$ in all weeks after the first and adds
+$(w-1)\min(g,s)$ unit clauses. The implementation offers three modes:
+\texttt{none} adds no SB clause, \texttt{sb1} adds \eqref{eq:sb1}, and
+\texttt{full} adds \eqref{eq:sb1} together with \eqref{eq:sb2}.
+
+\paragraph{Preservation under SB1.}
+Let $S$ be a valid schedule with first-week groups $G_1,\ldots,G_g$.
+Define a player permutation $\pi$ that maps the $s$ players of $G_j$ to
+$\{(j-1)s+1,\ldots,js\}$, and apply $\pi$ to every week of $S$ while
+keeping the group labels. The image is a valid schedule, because a
+global player permutation preserves group sizes and meetings, and its
+first week is exactly the block partition required by \eqref{eq:sb1}.
+Hence SB1 removes only isomorphic copies, and appending \eqref{eq:sb1}
+cannot turn a satisfiable instance into UNSAT.
+
+\paragraph{Preservation under SB1+SB2.}
+After \eqref{eq:sb1}, players $1,\ldots,\min(g,s)$ all belong to group
+1 in week~1, since $\min(g,s)\le s$. They meet in that week, so C3
+places them in pairwise distinct groups in every week $t\ge2$. For each
+such week, let $\sigma_t$ be a permutation of the group labels that maps
+the group of player $i$ to group $i$ for $i\le\min(g,s)$, and relabel
+the groups of week $t$ by $\sigma_t$. This leaves the first week, C1,
+C2, and the set of meetings unchanged, and produces $x_{i,i,t}=1$ for
+every required pair. Therefore every feasible schedule has a relabeled
+copy satisfying \eqref{eq:sb1} and \eqref{eq:sb2}, so \texttt{full}
+preserves satisfiability.
+
+\paragraph{Model-specific support.}
+For the direct encoder, SB clauses are appended as unit clauses and
+counted separately from the C2 encodings. CP-SAT adds
+\eqref{eq:sb1}--\eqref{eq:sb2} as domain constraints, and the ILP model
+adds the same rows as linear equalities. Order Encoding supports only
+\texttt{sb1}: in the slot model, fixing player $i$ to group $j$ without
+fixing its slot is a disjunction over the $s$ slots of that group, not a
+unit clause, so \texttt{--sb full} is rejected for the Order backend.
+For \texttt{sb1}, the order model fixes the threshold pattern of week~0
+to the value $js+c+1$ in slot $c$ of group $j$, using the zero-based
+$j,c$ of Section~\ref{sec:order_encoding}; this is the slot-wise form of
+\eqref{eq:sb1}.
+
+\paragraph{Experimental use.}
+The benchmark driver keeps \texttt{sb=none} as the default and records
+the selected mode in the run metadata, so symmetry-breaking variants can
+be compared on the same instances and encoders.
 
 \subsection{Unified Solving Pipeline, DIMACS Export, and Universal Verification}
 \label{sec:pipeline}
 
-The common CLI currently runs the three-index SAT and CP-SAT methods. The Order and ILP interfaces are intended to use the same schedule format and verifier.
+The common CLI dispatches to four backends: three-index SAT, CP-SAT, Order Encoding, and ILP. All four return the same canonical 0-based schedule and pass the same standalone verifier.
 \begin{enumerate}[label=(\arabic*),noitemsep]
-    \item \textbf{Partner-Bound Precheck}: The SAT and CP-SAT implementations check Equation~\eqref{eq:partner_bound} for $s > 1$. Instances with $w > w_{\max}$ return \texttt{UNSAT} without invoking a solver backend.
-    \item \textbf{Encoding / Model Construction \& DIMACS Export}: The SAT branch builds CNF and optionally exports DIMACS. The CP-SAT branch builds an integer model. Construction and solving times are recorded separately.
-    \item \textbf{Isolated Solving \& Timing}: SAT calls run in isolated subprocesses with wall-time cutoffs via \path{src/sat_runner.py}. CP-SAT records build time, solver wall time, and process CPU time separately.
+    \item \textbf{Partner-Bound Precheck}: Every backend checks Equation~\eqref{eq:partner_bound} for $s > 1$. Instances with $w > w_{\max}$ return \texttt{UNSAT} without invoking a solver backend.
+    \item \textbf{Encoding / Model Construction \& DIMACS Export}: The SAT branch builds CNF and can export it as DIMACS; the Order branch builds a CNF from the slot model; the CP-SAT and ILP branches build integer models. Construction and solving times are recorded separately.
+    \item \textbf{Isolated Solving \& Timing}: SAT and Order calls run in isolated subprocesses with wall-time cutoffs via \path{src/sat_runner.py}. CP-SAT and ILP record build time, solver wall time, and process CPU time separately.
     \item \textbf{Universal Solution Verification}: Every \texttt{SAT} outcome from this CLI is decoded to the canonical 0-based dictionary \texttt{schedule[week]}\allowbreak\texttt{[group]} and passed through our standalone \texttt{verify\_schedule} checker in \texttt{src/verifier.py}. The verifier independently checks all three SGP invariants---weekly bijection (C1), group cardinality $s$ (C2), and unique pairings across all weeks (C3)---in $O(w g s^2)$ time for a well-formed schedule before marking \texttt{verified = True}.
 \end{enumerate}
 
@@ -680,13 +887,13 @@ whose availability and scope still need to be confirmed.
 \subsection{Experiment 3: Order Encoding and Symmetry Breaking}
 \label{sec:exp3_order_sb}
 
-This comparison is pending the Order Encoding and symmetry modules.
-To separate the effect of representation from the effect of symmetry
-breaking, the comparison should use the same backend, instances and
-budget for three-index SAT and Order Encoding, then vary the verified
-symmetry restrictions within each representation. The clauses for each
-mode and its feasibility-preservation argument should be recorded with
-the results.
+This comparison is pending a controlled run of the Order Encoding and
+symmetry variants. To separate the effect of representation from the
+effect of symmetry breaking, the comparison should use the same backend,
+instances and budget for three-index SAT and Order Encoding, then vary
+the verified symmetry restrictions within each representation. The
+clauses for each mode and its feasibility-preservation argument should
+be recorded with the results.
 
 \section{Conclusion}
 \label{sec:conclusion}
@@ -697,16 +904,18 @@ trade-off between auxiliary variables and clauses: in the four
 structural examples, NSC uses the fewest auxiliary variables and
 Sequential Counter emits the fewest clauses.
 The SAT screen confirmed 102 satisfiable configurations across 15 distinct instances. All decided cases agreed with the known source statuses. A larger evaluation requires resources to build the skipped formulas and a longer time budget for undecided runs.
-Order Encoding, symmetry breaking, and the comparison with exact CP and
-MIP solvers require additional implementations and a common experimental
-protocol.
+The ILP baseline, Order Encoding, and symmetry breaking are implemented
+and described in Sections~\ref{sec:ilp_formulation},
+\ref{sec:order_encoding}, and~\ref{sec:symmetry_breaking}; their
+controlled comparison with the SAT encodings and with exact CP still
+requires a common experimental protocol.
 
 \section*{Group Contributions and Acknowledgments}
 This project is a collaboration among three students for course INT3011E (Advanced Topics in Computer Science) at VNU University of Engineering and Technology under the supervision of Dr.~To Van Khanh:
 \begin{itemize}[noitemsep]
     \item \textbf{Do Huy Hieu (Member 1)}: Universal Solution Verifier, schedule display, shared CLI and DIMACS exporter, OR-Tools CP-SAT model, \texttt{cnsplots} visualization, and paper editing (Abstract, Introduction, CP formulation, Experiments, Conclusion).
     \item \textbf{Pham Van Huong (Member 2)}: Three-index one-hot SAT encoding, custom NSC and PySAT \textit{Exactly}-$s$ encodings, isolated PySAT solver runner, dependencies, SAT methodology, and the SAT-only screening experiments.
-    \item \textbf{[Member 3 Full Name] (Member 3)}: Order Encoding, ILP formulation, symmetry-breaking module, automated benchmark suite, and ILP/Order/Symmetry sections.
+    \item \textbf{Nguyen Minh Son (Member 3)}: Order Encoding, ILP formulation, symmetry-breaking module, automated benchmark suite, and ILP/Order/Symmetry sections.
 \end{itemize}
 We gratefully acknowledge Dr.~To Van Khanh for his guidance, lectures, and reference research on SGP and Order Encoding.
 
