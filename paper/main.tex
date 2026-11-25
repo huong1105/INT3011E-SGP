@@ -121,7 +121,7 @@
 \cortext[1]{Corresponding author (Student ID: 24021470). Group report for Course INT3011E -- Advanced Topics in Computer Science. Supervisor: Dr. To Van Khanh.}
 
 \begin{abstract}
-The Social Golfer Problem (SGP) asks whether $gs$ players can be assigned to $g$ groups of size $s$ for $w$ weeks with no repeated pair. We implement a three-index SAT model and vary only the encoding of the group-size equality, using New Sequential Counter, Sequential Counter, Totalizer, and Cardinality Network. With CaDiCaL~1.5.3 and Glucose~4.1, the SAT benchmark covers 512 configurations on 64 instances under a 60-second wall-time budget. We obtain 240 verified SAT results across 33 instances, including an instance with 153 players. The partner bound decides 56 configurations, 200 reach the time limit, and 16 exceed the resource threshold. On four structural examples, New Sequential Counter uses the fewest auxiliary variables and Sequential Counter emits the fewest clauses.
+The Social Golfer Problem (SGP) asks whether $n = gs$ players can be scheduled into $g$ groups of size $s$ over $w$ weeks so that no two players end up in the same group more than once. In this report, we implement and compare four exact solving approaches in a shared codebase: a three-index one-hot SAT encoding tested with four \textit{Exactly}-$s$ encodings---New Sequential Counter (NSC), Sequential Counter, Totalizer, and Cardinality Network---using CaDiCaL~1.5.3 and Glucose~4.1; a slot-based Order Encoding; a Constraint Programming (CP) model in Google OR-Tools CP-SAT; and an Integer Linear Programming (ILP) model solved with Gurobi~14.0. Alongside an initial 2-second SAT screening across 528 configurations, we run a controlled single-thread, 60-second benchmark without symmetry breaking (\texttt{SB=none}) over all 64 active reference instances (768 runs total), applying a 5{,}000{,}000-clause limit for CNF encodings and checking every returned schedule with an independent Universal Verifier. Across the 768 runs, 330 reach verified SAT (covering 34 distinct instances), 84 are ruled UNSAT early by the theoretical partner bound, 20 hit the clause limit, and 334 time out, with zero errors or status mismatches. Within the 60-second limit, SAT \texttt{NSC}+Glucose solves the most instances (32), while \texttt{NSC}+CaDiCaL achieves the lowest average runtime (2.41\,s across 30 solved instances). OR-Tools CP-SAT solves 31 instances and is the only solver to finish the largest active case \texttt{19-10-2} ($n=190$) in 36.10\,s. Gurobi ILP solves 24 instances and leads on very small cases, while three-index Direct (NSC) runs $6.6\times$ faster on average than Order Encoding across their 20 commonly solved instances.
 \end{abstract}
 
 \begin{keywords}
@@ -133,31 +133,31 @@ Social Golfer Problem \sep SAT encoding \sep Cardinality constraints \sep New Se
 \section{Introduction}
 \label{sec:introduction}
 
-Combinatorial timetabling and grouping problems arise frequently in discrete mathematics, operations research, and automated reasoning \cite{colbourn2006handbook,biere2021handbook}. Among them, the \textbf{Social Golfer Problem (SGP)}---cataloged as \textbf{CSPLib problem~010} \cite{harvey2001csplib}---is one of the most recognized benchmarks for evaluating exact constraint solvers. Given $g$ groups of $p$ players each (for a total of $n = g \times p$ golfers) and a planning horizon of $w$ weeks, the decision version of the SGP asks whether a weekly grouping exists such that every player plays once per week and no two players appear in the same group more than once across all $w$ weeks. The complexity of this decision problem without preassigned players remains open. The completion variant, which starts from a partially assigned schedule, is NP-complete~\cite{triska2012tme,verplancke2026}.
+Timetabling and grouping problems appear often in discrete mathematics, operations research, and automated reasoning \cite{colbourn2006handbook,biere2021handbook}. Among them, the \textbf{Social Golfer Problem (SGP)}---listed as \textbf{CSPLib problem~010} \cite{harvey2001csplib}---is a well-known benchmark for testing exact constraint solvers. Given $g$ groups of $p$ players each (so $n = g \times p$ golfers in total) and $w$ weeks, the decision problem asks whether we can assign every player to one group each week so that no two players share a group more than once across all $w$ weeks. Whether this general decision problem (with no preassigned players) is in P or NP-complete is still open, whereas the completion version starting from a partial schedule is known to be NP-complete~\cite{triska2012tme,verplancke2026}.
 
-The computational difficulty of the SGP stems from two intertwined phenomena: super-exponential combinatorial explosion and massive solution symmetry \cite{gent2002cp,triska2012tme}. By arranging $n = g \times p$ players independently in each week and factoring out intra-group player orderings, intra-week group orderings, and week permutations, an approximate count of distinct schedules is given by $\frac{((g \times p)!)^w}{(p!)^{gw} \times (g!)^w \times w!}$ \cite{kieu2025nse}. Even for moderate parameter values, exhaustive search traverses vast numbers of symmetrically equivalent assignments unless symmetry is broken either structurally in the model or explicitly via symmetry-breaking constraints \cite{walsh2006symmetry}.
+The SGP is hard to solve for two main reasons: the search space grows exponentially, and any valid schedule has a huge number of symmetric copies \cite{gent2002cp,triska2012tme}. If we arrange $n = g \times p$ players independently each week and divide out player orderings within each group, group orderings within each week, and permutations of the weeks, the approximate number of distinct schedules is $\frac{((g \times p)!)^w}{(p!)^{gw} \times (g!)^w \times w!}$ \cite{kieu2025nse}. Even for moderate sizes, a solver can spend most of its time exploring equivalent symmetric assignments unless symmetry is reduced in the model or handled with extra symmetry-breaking constraints \cite{walsh2006symmetry}.
 
-Beyond its theoretical significance, the SGP models a range of real-world scheduling tasks. In sports timetabling, it generates balanced multi-team matchups and round-robin schedules \cite{briskorn2010sports,henz2001basketball}. In statistical experimental design, it balances treatment allocations across blocks to minimize confounding bias \cite{colbourn2006handbook,stinson2004designs,montgomery2017design}. Related grouping constraints also emerge in project-team rotation in education \cite{gent2002cp} and table assignment in competitive mahjong tournaments \cite{lester2021mahjong}.
+Besides being a classic benchmark, the SGP also captures practical scheduling tasks. In sports scheduling, it helps generate balanced tournament matchups and round-robin fixtures \cite{briskorn2010sports,henz2001basketball}. In experimental design, it balances how treatments are grouped into blocks to reduce bias \cite{colbourn2006handbook,stinson2004designs,montgomery2017design}. Similar grouping rules also show up when rotating student project teams \cite{gent2002cp} or assigning tables in competitive mahjong tournaments \cite{lester2021mahjong}.
 
-To solve the SGP, researchers have explored four principal methodological families:
+Previous work on the SGP generally falls into four main approaches:
 \begin{itemize}[noitemsep]
-    \item \textbf{Constraint Programming (CP)}: Leveraging integer domain variables, global filtering constraints such as \texttt{AllDifferent}, and dynamic or static symmetry breaking \cite{gent2002cp,azevedo2006dynamic,ortools}.
-    \item \textbf{Integer and Mixed-Integer Linear Programming (ILP/MIP)}: Modeling player-group-week assignments via binary variables and linearizing pairwise co-occurrence constraints for branch-and-cut solvers \cite{dotu2007local,gurobi}.
-    \item \textbf{Metaheuristics and Local Search}: Using tabu search or memetic evolutionary algorithms to quickly construct schedules for large instances \cite{cotta2006memetic,dotu2007local}; however, incomplete methods cannot certify unsatisfiability (UNSAT).
-    \item \textbf{Boolean Satisfiability (SAT)}: Translating the SGP into Conjunctive Normal Form (CNF) for Conflict-Driven Clause Learning (CDCL) solvers, evolving from four-index Direct Encoding (DE) \cite{gent2005sat} and Triska--Musliu Encoding (TME) \cite{triska2012tme} to Set Constraint Encoding (SCE) \cite{lardeux2015sce} and the compact three-index New SAT Encoding (NSE) with the New Sequential Counter (NSC) \cite{kieu2025nse}.
+    \item \textbf{Constraint Programming (CP)}: Uses integer variables, global constraints such as \texttt{AllDifferent}, and static or dynamic symmetry breaking \cite{gent2002cp,azevedo2006dynamic,ortools}.
+    \item \textbf{Integer and Mixed-Integer Linear Programming (ILP/MIP)}: Uses binary variables for player-group-week assignments and linearizes pairwise meeting constraints for branch-and-cut solvers \cite{dotu2007local,gurobi}.
+    \item \textbf{Metaheuristics and Local Search}: Applies methods like tabu search or memetic algorithms to find schedules quickly on large inputs \cite{cotta2006memetic,dotu2007local}, though these incomplete methods cannot prove unsatisfiability (UNSAT).
+    \item \textbf{Boolean Satisfiability (SAT)}: Converts the SGP into Conjunctive Normal Form (CNF) for CDCL solvers, moving from four-index Direct Encoding (DE) \cite{gent2005sat} and Triska--Musliu Encoding (TME) \cite{triska2012tme} to Set Constraint Encoding (SCE) \cite{lardeux2015sce} and the more compact three-index New SAT Encoding (NSE) with the New Sequential Counter (NSC) \cite{kieu2025nse}.
 \end{itemize}
 
-In the literature, standard SGP instances are labeled by the triple $g\text{-}p\text{-}w$ (groups, players per group, weeks). Throughout our software architecture and API, we parameterize instances by $(w, g, s)$ with group size $s = p$ and $n = g \times s$; for example, the canonical instance \texttt{2-2-3} corresponds to $\text{SGP}(w=3, g=2, s=2)$.
+In standard SGP notation, instances are written as $g\text{-}p\text{-}w$ (groups, players per group, weeks). In our codebase and API, we write $(w, g, s)$ with group size $s = p$ and $n = g \times s$; for example, the small instance \texttt{2-2-3} corresponds to $\text{SGP}(w=3, g=2, s=2)$.
 
-This report presents an implementation and initial evaluation of the three-index SAT model, along with the CP-SAT baseline. Our main contributions are summarized as follows:
+In this report, we design, implement, and compare SAT, Order Encoding, CP-SAT, and ILP solvers on the SGP under a shared test suite. Our main contributions are:
 \begin{enumerate}[label=(\arabic*),noitemsep]
-    \item \textbf{Controlled Ablation of \textit{Exactly}-$s$ Cardinality Encodings}: Adopting the three-index one-hot Boolean representation with fixed group-assignment (C1) and unique-pairing (C3) constraints, we systematically compare four Group Size (C2) encodings---NSC \cite{kieu2025nse}, Sequential Counter \cite{sinz2005towards}, Totalizer \cite{bailleux2003totalizer}, and Cardinality Network \cite{asin2009cardnet}---across two CDCL solvers (CaDiCaL~1.5.3 and Glucose~4.1).
-    \item \textbf{Order Encoding and Symmetry Breaking}: We implement Order Encoding~\cite{tamura2009order} and static symmetry breaking (SB1 and SB2)~\cite{kieu2025nse} and describe their formulations for a follow-up comparison.
-    \item \textbf{Exact Baselines}: We implement a CP-SAT model in Google OR-Tools using \texttt{AllDifferent}, \texttt{Inverse}, and \texttt{AtMostOne}, and implement an ILP model for a subsequent comparison on common instances.
-    \item \textbf{Unified Pipeline and Independent Verification}: We provide a common CLI, DIMACS CNF exporter, partner-bound precheck, and a shared verifier for the three SGP constraints.
+    \item \textbf{Comparing C2 Cardinality Encodings}: Keeping the three-index one-hot SAT variables with fixed group-assignment (C1) and unique-pairing (C3) clauses, we test four Group Size (C2) encodings---NSC \cite{kieu2025nse}, Sequential Counter \cite{sinz2005towards}, Totalizer \cite{bailleux2003totalizer}, and Cardinality Network \cite{asin2009cardnet}---on CaDiCaL~1.5.3 and Glucose~4.1, covering both formula sizes/2-second screening and a full 60-second benchmark.
+    \item \textbf{Direct vs.\ Order Encoding and Symmetry-Breaking Support}: We compare three-index Direct SAT against slot-based Order Encoding~\cite{tamura2009order} under \texttt{SB=none}, and also implement static symmetry-breaking options (\texttt{SB1}/\texttt{SB2})~\cite{kieu2025nse} across the solvers for future tests.
+    \item \textbf{Cross-Paradigm Exact Comparison}: We test the SAT encodings alongside Google OR-Tools CP-SAT (\texttt{AllDifferent}, \texttt{Inverse}, \texttt{AtMostOne}) and Gurobi~14.0 ILP using the same single-thread, 60-second time limit across 64 active benchmark instances.
+    \item \textbf{Shared Reproducible Pipeline}: We build a common CLI (\texttt{main.py}), DIMACS CNF exporter, partner-bound precheck, standalone Universal Verifier (\texttt{src/\allowbreak verifier.py}), CSV~v1 benchmark runner (\texttt{benchmarks/\allowbreak run\_\allowbreak all.py}), and CNSPlots visualization script (\texttt{benchmarks/\allowbreak plot\_\allowbreak cns.py}).
 \end{enumerate}
 
-The remainder of this paper is organized as follows. Section~\ref{sec:formulation} defines the SGP formally, states the partner bound, and presents the CP and ILP formulations. Section~\ref{sec:sat_approach} details the three-index SAT model, the four \textit{Exactly}-$s$ encodings, Order Encoding, symmetry breaking, and our verification pipeline. Section~\ref{sec:experiments} presents the experimental setup, empirical results, and analytical discussion. Section~\ref{sec:conclusion} concludes the paper and provides data and code availability.
+The rest of this report is organized as follows. Section~\ref{sec:formulation} defines the SGP, states the partner bound, and describes the CP and ILP models. Section~\ref{sec:sat_approach} covers the three-index SAT model, the four \textit{Exactly}-$s$ encodings, Order Encoding, symmetry breaking, and our verification pipeline. Section~\ref{sec:experiments} presents the experimental setup and benchmark results, and Section~\ref{sec:conclusion} summarizes our findings and future work.
 
 \section{Problem Formulation and Exact Baseline Paradigms}
 \label{sec:formulation}
@@ -172,12 +172,12 @@ Let $P = \{0, 1, \ldots, n - 1\}$ denote the set of $n = g \times s$ players, wh
     \item \textbf{Unique Pairings (Social Constraint)}: No two distinct players meet more than once across the entire schedule: $|G_{k_1,j_1} \cap G_{k_2,j_2}| \le 1$ whenever $(k_1, j_1) \neq (k_2, j_2)$.
 \end{enumerate}
 
-\noindent\textbf{Theoretical Partner Bound:} When $s > 1$, each player interacts with $s - 1$ distinct partners per week out of $n - 1 = gs - 1$ other players. Since pairings cannot repeat, a necessary condition for feasibility is:
+\noindent\textbf{Theoretical Partner Bound:} When $s > 1$, each player meets $s - 1$ different teammates per week out of the $n - 1 = gs - 1$ other players. Because pairs cannot repeat, any valid schedule must satisfy:
 \begin{equation}
     w \le w_{\max} = \left\lfloor \frac{g s - 1}{s - 1} \right\rfloor \qquad (s > 1).
     \label{eq:partner_bound}
 \end{equation}
-When $s = 1$, groups are singletons and no partner constraint restricts $w$. Importantly, Equation~(\ref{eq:partner_bound}) is necessary but \emph{not sufficient}: for instance, $\text{SGP}(w=2, g=2, s=3)$ satisfies $w = 2 \le \lfloor (6-1)/(3-1) \rfloor = 2$, yet is provably UNSAT because any group of 3 players in week~2 must contain at least 2 players from the same week-1 group by the pigeonhole principle.
+When $s = 1$, each group has only one player, so there is no upper limit on $w$. Note that Equation~(\ref{eq:partner_bound}) is necessary but \emph{not sufficient}. For example, $\text{SGP}(w=2, g=2, s=3)$ satisfies $w = 2 \le \lfloor (6-1)/(3-1) \rfloor = 2$, yet it is still UNSAT because any 3-player group in week~2 must contain at least 2 players who were already together in week~1 (by the pigeonhole principle).
 
 \begin{example}
 Consider the instance \texttt{2-2-3} ($g = 2$, $p = s = 2$, $w = 3$, so $n = 4$ players). In 1-based display notation, a valid schedule achieving $w = w_{\max} = 3$ is: Week~1: $\{1, 2\}, \{3, 4\}$; Week~2: $\{1, 3\}, \{2, 4\}$; Week~3: $\{1, 4\}, \{2, 3\}$.
@@ -203,17 +203,17 @@ Group assignment variable & $G_{ikl} \in \{\text{TRUE}, \text{FALSE}\}$ & $\text
 \subsection{Constraint Programming (CP) Formulation}
 \label{sec:cp_formulation}
 
-In Constraint Programming \cite{gent2002cp,ortools}, we model the SGP using integer domain variables coupled with global propagation constraints, implemented in \texttt{src/cp\_solver.py} using Google OR-Tools CP-SAT. Let $K = \{0, \ldots, w - 1\}$, $J = \{0, \ldots, g - 1\}$, $C = \{0, \ldots, s - 1\}$, and $P = \{0, \ldots, n - 1\}$.
+In Constraint Programming \cite{gent2002cp,ortools}, we model the SGP with integer variables and global constraints in \texttt{src/cp\_solver.py} using Google OR-Tools CP-SAT. Let $K = \{0, \ldots, w - 1\}$, $J = \{0, \ldots, g - 1\}$, $C = \{0, \ldots, s - 1\}$, and $P = \{0, \ldots, n - 1\}$.
 
-\noindent\textbf{Decision and Channeling Variables:}
+\noindent\textbf{Variables:}
 \begin{itemize}[noitemsep]
-    \item $\text{slot}_{k,j,c} \in \{0, \ldots, n - 1\}$: integer variable denoting the player assigned to position $c \in C$ of group $j \in J$ in week $k \in K$.
-    \item $\text{pos}_{k,i} \in \{0, \ldots, n - 1\}$: inverse channeling variable denoting the flattened weekly slot position $j \cdot s + c$ occupied by player $i \in P$ in week $k \in K$.
-    \item $\text{group\_of}_{k,i} \in \{0, \ldots, g - 1\}$: integer variable denoting the group index of player $i \in P$ in week $k \in K$.
-    \item $m_{i_1,i_2,k} \in \{0, 1\}$: reified Boolean indicator equal to $1$ if and only if players $i_1 < i_2$ belong to the same group in week $k$.
+    \item $\text{slot}_{k,j,c} \in \{0, \ldots, n - 1\}$: the player assigned to slot $c \in C$ of group $j \in J$ in week $k \in K$.
+    \item $\text{pos}_{k,i} \in \{0, \ldots, n - 1\}$: the flattened slot index $j \cdot s + c$ occupied by player $i \in P$ in week $k \in K$.
+    \item $\text{group\_of}_{k,i} \in \{0, \ldots, g - 1\}$: the group index of player $i \in P$ in week $k \in K$.
+    \item $m_{i_1,i_2,k} \in \{0, 1\}$: a Boolean indicator equal to $1$ if and only if players $i_1 < i_2$ are in the same group in week $k$.
 \end{itemize}
 
-\noindent\textbf{Constraints:} Each group structurally holds exactly $s$ slot variables, satisfying (C2) by construction. Within every week $k \in K$, we enforce:
+\noindent\textbf{Constraints:} Each group always holds $s$ slot variables, so (C2) is satisfied automatically. Within each week $k \in K$, we add:
 \begin{align}
     \text{slot}_{k,j,c} &< \text{slot}_{k,j,c+1}
       && j \in J,\ 0\le c<s-1, \label{eq:cp_order} \\
@@ -224,14 +224,14 @@ In Constraint Programming \cite{gent2002cp,ortools}, we model the SGP using inte
     \text{group\_of}_{k,i} &= \lfloor \text{pos}_{k,i} / s \rfloor
       && i \in P. \label{eq:cp_div}
 \end{align}
-where for the degenerate case $s = 1$, Equation~(\ref{eq:cp_div}) simplifies directly to $\text{group\_of}_{k,i} = \text{pos}_{k,i}$.
+When $s = 1$, Equation~(\ref{eq:cp_div}) simply becomes $\text{group\_of}_{k,i} = \text{pos}_{k,i}$.
 
-To enforce the Unique Pairings constraint (C3) when $w > 1$ and $s > 1$, we avoid $O(w^2 g^2 n^2)$ pairwise week-group checks by reifying player co-membership per week and applying an \texttt{AtMostOne} constraint across weeks for every pair $0 \le i_1 < i_2 < n$:
+To enforce Unique Pairings (C3) when $w > 1$ and $s > 1$, instead of checking $O(w^2 g^2 n^2)$ combinations of weeks and groups, we track whether each pair meets in each week and add an \texttt{AtMostOne} constraint across weeks for every pair $0 \le i_1 < i_2 < n$:
 \begin{align}
     m_{i_1,i_2,k} = 1 &\iff \big(\text{group\_of}_{k,i_1} = \text{group\_of}_{k,i_2}\big) && \forall k \in K, \label{eq:cp_reify} \\
     \sum_{k=0}^{w-1} m_{i_1,i_2,k} &\le 1 && \text{(\texttt{AddAtMostOne} across weeks)}. \label{eq:cp_social}
 \end{align}
-This yields $w n$ slot variables, $w n$ inverse variables, $w n$ group variables (for $s > 1$), and $w \binom{n}{2}$ Boolean meeting indicators when $w>1$ and $s>1$. When optional static symmetry breaking is enabled via \texttt{--sb}, we additionally fix the first week (\texttt{sb1}: $\text{slot}_{0,j,c} = j \cdot s + c$) and the first $\min(g, s)$ players across subsequent weeks (\texttt{full}: $\text{group\_of}_{k,i} = i$ for $k \ge 1, 0 \le i < \min(g, s)$). Note that \texttt{AllDifferent} enables CP-SAT to perform strong Hall-interval domain filtering across each week, while SAT-clause learning inside OR-Tools CP-SAT handles conflict propagation over the reified $m_{i_1,i_2,k}$ variables.
+In total, the model uses $w n$ slot variables, $w n$ position variables, $w n$ group variables (for $s > 1$), and $w \binom{n}{2}$ meeting indicators when $w>1$ and $s>1$. If optional static symmetry breaking is enabled via \texttt{--sb}, we also fix the first week (\texttt{sb1}: $\text{slot}_{0,j,c} = j \cdot s + c$) and assign the first $\min(g, s)$ players to distinct groups in later weeks (\texttt{full}: $\text{group\_of}_{k,i} = i$ for $k \ge 1, 0 \le i < \min(g, s)$). Inside OR-Tools CP-SAT, \texttt{AllDifferent} narrows variable domains in each week, while built-in clause learning handles conflicts over the $m_{i_1,i_2,k}$ variables.
 
 \subsection{Integer Linear Programming (ILP) Formulation}
 \label{sec:ilp_formulation}
@@ -750,12 +750,12 @@ be compared on the same instances and encoders.
 \subsection{Unified Solving Pipeline, DIMACS Export, and Universal Verification}
 \label{sec:pipeline}
 
-The common CLI dispatches to four backends: three-index SAT, CP-SAT, Order Encoding, and ILP. All four return the same canonical 0-based schedule and pass the same standalone verifier.
+Our CLI (\texttt{main.py}) and benchmark runner (\texttt{benchmarks/run\_all.py}) run all four methods---\texttt{sat}, \texttt{order}, \texttt{cp}, and \texttt{ilp}---through the same pipeline and output format:
 \begin{enumerate}[label=(\arabic*),noitemsep]
-    \item \textbf{Partner-Bound Precheck}: Every backend checks Equation~\eqref{eq:partner_bound} for $s > 1$. Instances with $w > w_{\max}$ return \texttt{UNSAT} without invoking a solver backend.
-    \item \textbf{Encoding / Model Construction \& DIMACS Export}: The SAT branch builds CNF and can export it as DIMACS; the Order branch builds a CNF from the slot model; the CP-SAT and ILP branches build integer models. Construction and solving times are recorded separately.
-    \item \textbf{Isolated Solving \& Timing}: SAT and Order calls run in isolated subprocesses with wall-time cutoffs via \path{src/sat_runner.py}. CP-SAT and ILP record build time, solver wall time, and process CPU time separately.
-    \item \textbf{Universal Solution Verification}: Every \texttt{SAT} outcome from this CLI is decoded to the canonical 0-based dictionary \texttt{schedule[week]}\allowbreak\texttt{[group]} and passed through our standalone \texttt{verify\_schedule} checker in \texttt{src/verifier.py}. The verifier independently checks all three SGP invariants---weekly bijection (C1), group cardinality $s$ (C2), and unique pairings across all weeks (C3)---in $O(w g s^2)$ time for a well-formed schedule before marking \texttt{verified = True}.
+    \item \textbf{Partner-Bound Precheck}: All four solvers first check Equation~\eqref{eq:partner_bound} when $s > 1$. Any instance with $w > w_{\max}$ stops right away with \texttt{UNSAT\_PRECHECK} before building a model.
+    \item \textbf{Model Construction \& DIMACS Export}: The SAT and Order solvers generate CNF formulas (and can save them as DIMACS files using \texttt{--export-cnf}), while CP-SAT and Gurobi build integer and linear models. Building time (\texttt{encode\_time\_seconds}), variable count (\texttt{num\_vars}), and clause or constraint count (\texttt{num\_clauses} / \texttt{num\_constraints}) are logged separately.
+    \item \textbf{Isolated Runs \& Timing}: Each test case runs in its own worker process, initializing solver libraries and Gurobi before starting the total timeout clock (\texttt{total\_time\_seconds}), while also saving the solver-only time (\texttt{solver\_wall\_time\_seconds}). Results are written to a locked CSV~v1 file alongside a \texttt{.meta.json} settings file.
+    \item \textbf{Universal Solution Verification}: Every \texttt{SAT} solution from any of the four solvers is converted to the 0-based format \texttt{schedule[week]}\allowbreak\texttt{[group]} and checked by \texttt{verify\_schedule} in \texttt{src/verifier.py}. The verifier confirms weekly coverage (C1), exact group size $s$ (C2), and unique pairs across all weeks (C3) in $O(w g s^2)$ time before setting \texttt{verified = True}.
 \end{enumerate}
 
 \section{Computational Experiments}
@@ -769,6 +769,9 @@ records the status reported by the course manuscript~\cite{kieu-course-nse}.
 We use $s=p$ and pass the triples to the encoder as $(w,g,s)$.
 Source statuses serve as cross-checks for decided runs. An unknown
 reference status, timeout, or unattempted run provides no decision.
+
+\paragraph{Four-Paradigm Benchmark Setup and Environment.}
+For our main comparison (\texttt{benchmarks/results.csv}), we test 64 active instances from \texttt{benchmarks/benchmark\_instances.csv}; the two largest cases \texttt{11-11-12} ($n=121$) and \texttt{13-13-14} ($n=169$) are turned off in the shared suite for separate CP testing. Each active instance is run across 12 configurations (768 runs total): four SAT C2 encodings $\times$ two SAT solvers (CaDiCaL~1.5.3~\cite{cadical153} and Glucose~4.1~\cite{audemard2018glucose}), Order Encoding $\times$ the same two SAT solvers, Google OR-Tools CP-SAT~\cite{ortools}, and Gurobi ILP~\cite{gurobi}. All 768 runs share the same baseline saved in \texttt{results.csv.meta.json}: no symmetry breaking (\texttt{SB=none}), single-threaded execution (\texttt{num\_threads=1}), and a 60-second total time limit (\texttt{timeout\_scope=total}) covering model building, solving, decoding, and verification inside isolated worker processes (after library and Gurobi initialization). To avoid running out of memory on huge CNF files, \texttt{sat} and \texttt{order} skip instances where the C3 clause lower bound $\binom{n}{2}\binom{w}{2}g^2$ exceeds 5{,}000{,}000 clauses (\texttt{SKIPPED\_RESOURCE\_LIMIT}); this skips \texttt{9-9-10} (11{,}809{,}800 estimated C3 clauses) and \texttt{19-10-2} (6{,}481{,}755 estimated C3 clauses). All 768 runs were executed on an Acer Swift SF314-512 running Microsoft Windows~11 Home (Build~26300), 12th Gen Intel Core~i5-1240P (12 cores, 16 logical processors), and 16\,GB RAM (15.71\,GiB usable), using Python~3.12.10, PySAT~1.9.dev21~\cite{imms2018pysat}, OR-Tools~9.15.6755, Gurobi~14.0.0 (unrestricted Academic license), and CNSPlots~0.8.0.
 
 \subsection{Experiment 1: Ablation of C2 Exactly-$s$ Encodings}
 \label{sec:exp1_c2}
@@ -880,7 +883,7 @@ records one thread, a 60-second total wall-time budget, and one result per
 configuration. The timer starts after benchmark-worker preparation and
 covers CNF construction, the nested SAT subprocess, and verification.
 The CSV separately records the backend's solve-only time when available.
-The metadata does not specify the host or installed package versions.
+Although the metadata file itself omits host details, all runs used the hardware and package environment reported in Section~\ref{sec:exp_setup}.
 
 The partner-bound precheck runs before CNF construction. The benchmark
 also skips configurations with more than 5{,}000{,}000 estimated C3
@@ -962,51 +965,123 @@ For NSC, the remaining time was 9.73 seconds, about 76\% of its total.
     \label{fig:c2-benchmark-breakdown}
 \end{figure}
 
-\subsection{Experiment 2: Cross-Paradigm Comparison}
+\subsection{Experiment 2: Comparing SAT, CP-SAT, and ILP}
 \label{sec:exp2_paradigms}
 
-The shared CSV includes OR-Tools CP-SAT and Gurobi runs on the same
-64 enabled instances under the budget in Section~\ref{sec:exp1_c2}.
-The benchmark records build and solver times separately and verifies
-feasible schedules. A solver-only cactus plot excludes partner-bound
-precheck outcomes. Evaluation with CPLEX CP and CPLEX MIP remains open.
+Across all 768 runs in the 60-second benchmark, 330 runs returned \texttt{SAT} with schedules verified by \texttt{src/\allowbreak verifier.py} (covering 34 distinct instances), 84 runs (7 instances) ended early via \texttt{UNSAT\_\allowbreak PRECHECK}, 20 CNF runs (2 instances) hit \texttt{SKIPPED\_\allowbreak RESOURCE\_\allowbreak LIMIT}, and 334 runs reached \texttt{TIMEOUT}, with zero errors (\texttt{ERROR=0}) and zero mismatches against the expected source statuses. Table~\ref{tab:overall_benchmark} summarizes all 12 configurations across the 64 active instances.
 
-\subsection{Experiment 3: Order Encoding and Symmetry Breaking}
+\begin{table}[pos=!htb]
+\centering\small
+\setlength{\tabcolsep}{4pt}
+\caption{Summary of all 12 solver configurations across 64 active SGP instances (\texttt{SB=none}, 1 thread, 60\,s total time limit). \textbf{Pre.} is partner-bound \texttt{UNSAT\_PRECHECK}, \textbf{TO} is \texttt{TIMEOUT}, and \textbf{Skip} is the 5M-clause guard. Mean, median, and max runtimes are over solved \texttt{SAT} runs.}
+\label{tab:overall_benchmark}
+\begin{tabular}{lllrrrrrrrr}
+\toprule
+\textbf{Method} & \textbf{Encoding} & \textbf{Solver} & \textbf{SAT} & \textbf{Pre.} & \textbf{TO} & \textbf{Skip} & \textbf{Mean (s)} & \textbf{Med.\ (s)} & \textbf{Max (s)} & \textbf{Max $n$} \\
+\midrule
+SAT & NSC & CaDiCaL~1.5.3 & 30 & 7 & 25 & 2 & \textbf{2.41} & 0.85 & 16.18 & 153 \\
+SAT & NSC & Glucose~4.1 & \textbf{32} & 7 & 23 & 2 & 3.04 & 0.86 & 28.46 & 153 \\
+SAT & SeqCounter & CaDiCaL~1.5.3 & 30 & 7 & 25 & 2 & 3.98 & 1.02 & 27.33 & 153 \\
+SAT & SeqCounter & Glucose~4.1 & 31 & 7 & 24 & 2 & 3.14 & 0.87 & 19.88 & 153 \\
+SAT & Totalizer & CaDiCaL~1.5.3 & 30 & 7 & 25 & 2 & 3.21 & 1.41 & \textbf{14.82} & 153 \\
+SAT & Totalizer & Glucose~4.1 & 31 & 7 & 24 & 2 & 3.30 & 0.99 & 22.44 & 153 \\
+SAT & CardNet & CaDiCaL~1.5.3 & 30 & 7 & 25 & 2 & 3.90 & 1.35 & 23.13 & 153 \\
+SAT & CardNet & Glucose~4.1 & 26 & 7 & 29 & 2 & 3.13 & \textbf{0.71} & 41.13 & 91 \\
+\midrule
+Order & Order & CaDiCaL~1.5.3 & 20 & 7 & 35 & 2 & 4.72 & 0.87 & 41.04 & 66 \\
+Order & Order & Glucose~4.1 & 15 & 7 & 40 & 2 & 4.23 & 0.79 & 29.06 & 66 \\
+CP & --- & OR-Tools CP-SAT & 31 & 7 & 26 & 0 & 9.65 & 3.80 & 55.41 & \textbf{190} \\
+ILP & --- & Gurobi~14.0 & 24 & 7 & 33 & 0 & 4.00 & 1.09 & 43.67 & 153 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:cactus_sat_cp_ilp} compares representative SAT (\texttt{NSC} with CaDiCaL~1.5.3), CP (OR-Tools CP-SAT), and ILP (Gurobi~14.0) runs over the 55 shared attempted instances (excluding the 7 partner-bound prechecks and the 2 CNF-skipped instances). On these 55 instances, SAT (\texttt{NSC}+CaDiCaL) and CP-SAT each solve 30 instances while Gurobi ILP solves 24. Comparing paired runtimes shows clear differences in how the three solvers scale:
+\begin{itemize}[noitemsep]
+    \item \textbf{Common 24 instances (SAT + CP-SAT + ILP):} SAT (\texttt{NSC}+CaDiCaL) averages 1.68\,s (median 0.53\,s, max 12.82\,s), compared to 4.00\,s for Gurobi ILP (median 1.09\,s, max 43.67\,s) and 4.20\,s for CP-SAT (median 2.43\,s, max 24.16\,s). Gurobi is the fastest on very small inputs like \texttt{3-2-2} ($<$0.01\,s) and \texttt{4-3-3} (0.05\,s), but becomes slower than SAT after about seven instances as the number of linearization constraints grows.
+    \item \textbf{Common 30 instances (SAT + CP-SAT):} SAT (\texttt{NSC}+CaDiCaL) averages 2.41\,s (median 0.85\,s) compared to 8.76\,s for CP-SAT (median 3.41\,s), which is a $3.6\times$ speedup on the cases both solvers finish.
+    \item \textbf{High-$w$ / near-$w_{\max}$ instances:} As shown in Table~\ref{tab:representative_instances}, SAT is much faster than CP-SAT and ILP on dense multi-week schedules such as \texttt{5-3-7} (0.98--2.10\,s vs.\ 45.42\,s for CP-SAT and ILP timeout), \texttt{5-5-6} (0.60--1.84\,s vs.\ 55.41\,s for CP-SAT and ILP timeout), and \texttt{9-4-8} (5.56--16.18\,s vs.\ 18.64\,s for CP-SAT). Moreover, \texttt{8-3-10} (28.46\,s), \texttt{6-5-5} (8.09\,s), and \texttt{9-3-11} (13.08--19.88\,s) are solved only by SAT (Glucose~4.1), while CaDiCaL, Order Encoding, CP-SAT, and Gurobi all time out.
+    \item \textbf{Large-$n$, low-$w$ instances (\texttt{19-10-2}, $n=190$):} On \texttt{19-10-2}, the C3 clause lower bound reaches 6{,}481{,}755 clauses, so every SAT and Order run hits \texttt{SKIPPED\_RESOURCE\_LIMIT}, while Gurobi times out after 60\,s. Because \texttt{AllDifferent} and \texttt{Inverse} avoid creating pairwise clauses up front, OR-Tools CP-SAT needs only 37{,}050 variables and 90{,}501 constraints and is the only solver to solve \texttt{19-10-2} (in 36.10\,s). On the other hand, on \texttt{17-9-2} ($n=153$), \texttt{NSC}+CaDiCaL (12.82\,s; 50{,}490 vars, 3{,}583{,}056 clauses) is still nearly $2\times$ faster than CP-SAT (24.16\,s; 24{,}174 vars, 58{,}722 constraints) and $3.4\times$ faster than Gurobi (43.67\,s; 400{,}554 vars, 1{,}198{,}024 constraints).
+    \item \textbf{Unproven UNSAT instances:} All eight UNSAT instances that pass the partner-bound precheck (\texttt{5-7-5}, \texttt{6-6-7}, \texttt{5-8-3}, \texttt{6-7-4}, \texttt{5-10-4}, \texttt{5-10-5}, \texttt{6-9-4}, and \texttt{8-10-3}) timed out at 60\,s across all 12 runs under \texttt{SB=none}, showing that symmetry breaking is needed when proving unsatisfiability.
+\end{itemize}
+
+\begin{figure}[pos=!htb]
+    \centering
+    \includesafeimage[width=0.88\textwidth]{cactus_sat_cp_ilp.pdf}
+    \caption{Cactus plot comparing SAT (\texttt{NSC} + CaDiCaL~1.5.3, 30 solved), CP (OR-Tools CP-SAT, 30 solved), and ILP (Gurobi~14.0, 24 solved) over 55 shared attempted instances (\texttt{SB=none}, 1 thread, 60\,s total limit), plotted with CNSPlots~0.8.0.}
+    \label{fig:cactus_sat_cp_ilp}
+\end{figure}
+
+\begin{table}[pos=!htb]
+\centering\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\caption{Total runtime (seconds) on 19 representative SGP instances ($n \in [6, 190]$, \texttt{SB=none}, 60\,s limit). \textbf{TO} = timeout; \textbf{SKIP} = exceeded 5M-clause guard. Fastest valid time in each row is in bold.}
+\label{tab:representative_instances}
+\begin{tabular}{lrccccccc}
+\toprule
+\textbf{Inst.} & $n$ & \textbf{NSC(CaD)} & \textbf{NSC(Glu)} & \textbf{Seq(Glu)} & \textbf{Tot(Glu)} & \textbf{Order(CaD)} & \textbf{CP-SAT} & \textbf{Gurobi} \\
+\midrule
+\texttt{3-2-2} & 6 & 0.19 & 0.20 & 0.21 & 0.22 & 0.22 & 0.03 & \textbf{$<$0.01} \\
+\texttt{5-3-6} & 15 & 0.52 & 0.39 & \textbf{0.38} & 0.45 & 8.41 & 1.75 & 2.08 \\
+\texttt{5-3-7} & 15 & \textbf{0.98} & 1.35 & 2.10 & 1.01 & TO & 45.42 & TO \\
+\texttt{5-4-4} & 20 & 0.32 & 0.32 & \textbf{0.31} & 0.35 & 1.01 & 0.79 & 1.65 \\
+\texttt{8-3-10} & 24 & TO & \textbf{28.46} & TO & TO & TO & TO & TO \\
+\texttt{5-5-6} & 25 & 1.84 & 0.62 & \textbf{0.60} & 0.70 & 0.94 & 55.41 & TO \\
+\texttt{9-3-11} & 27 & TO & TO & 19.88 & \textbf{13.08} & TO & TO & TO \\
+\texttt{6-5-5} & 30 & TO & \textbf{8.09} & TO & TO & TO & TO & TO \\
+\texttt{8-4-6} & 32 & 1.97 & 1.92 & 1.94 & 2.03 & TO & 4.10 & \textbf{1.68} \\
+\texttt{8-4-7} & 32 & 4.51 & \textbf{3.39} & 4.65 & 5.53 & TO & 14.74 & TO \\
+\texttt{9-4-7} & 36 & 4.11 & 4.00 & 4.03 & 4.40 & TO & 6.23 & \textbf{3.51} \\
+\texttt{9-4-8} & 36 & 16.18 & \textbf{5.56} & 10.40 & 14.76 & TO & 18.64 & TO \\
+\texttt{7-7-3} & 49 & \textbf{0.83} & \textbf{0.83} & 0.87 & 0.99 & 1.70 & 5.25 & 1.93 \\
+\texttt{11-6-2} & 66 & 1.30 & \textbf{1.23} & 1.45 & 1.48 & 2.88 & 6.06 & 2.60 \\
+\texttt{9-9-3} & 81 & 3.67 & \textbf{3.06} & 4.36 & 4.90 & TO & 11.34 & TO \\
+\texttt{10-9-3} & 90 & 4.95 & \textbf{4.75} & 7.72 & 6.39 & TO & 16.67 & TO \\
+\texttt{15-8-2} & 120 & \textbf{6.11} & 6.14 & 6.91 & 9.73 & TO & 17.81 & 21.45 \\
+\texttt{17-9-2} & 153 & \textbf{12.82} & 13.07 & 18.49 & 22.44 & TO & 24.16 & 43.67 \\
+\texttt{19-10-2} & 190 & SKIP & SKIP & SKIP & SKIP & SKIP & \textbf{36.10} & TO \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Experiment 3: Direct vs.\ Order Encoding and Symmetry-Breaking Scope}
 \label{sec:exp3_order_sb}
 
-The shared CSV includes Order Encoding with both PySAT backends at
-\texttt{SB=none}. Runs with other symmetry settings remain open. To separate the effect of representation from the
-effect of symmetry breaking, the comparison should use the same backend,
-instances and budget for three-index SAT and Order Encoding, then vary
-the verified symmetry restrictions within each representation. The
-clauses for each mode and its feasibility-preservation argument should
-be recorded with the results.
+Figure~\ref{fig:bar_direct_vs_order} compares three-index Direct SAT (\texttt{NSC}) with slot-based Order Encoding under the same CaDiCaL~1.5.3, single-thread, and \texttt{SB=none} settings on the first 12 commonly solved instances ordered by $n$. Across all 64 instances, Direct (\texttt{NSC}) solves 30 instances with CaDiCaL (32 with Glucose) up to $n=153$, whereas Order Encoding solves 20 with CaDiCaL (15 with Glucose) up to $n=66$ (\texttt{11-6-2}) and times out on every instance with $n \ge 81$.
+
+\begin{figure}[pos=!htb]
+    \centering
+    \includesafeimage[width=0.88\textwidth]{bar_direct_vs_order.pdf}
+    \caption{Total runtime comparison between Direct (\texttt{NSC}) and Order Encoding on CaDiCaL~1.5.3 (\texttt{SB=none}, 60\,s limit) across the first 12 shared solved instances, plotted with CNSPlots~0.8.0.}
+    \label{fig:bar_direct_vs_order}
+\end{figure}
+
+Across all 20 instances solved by both encodings with CaDiCaL, Direct (\texttt{NSC}) takes 0.71\,s on average using 3{,}574 variables and 131{,}909 clauses, while Order Encoding takes 4.72\,s using 44{,}426 variables and 207{,}932 clauses---so Direct uses $12.4\times$ fewer variables and runs $6.6\times$ faster on average. Order Encoding slows down sharply as $w$ increases, such as on \texttt{5-3-6} (0.52\,s vs.\ 8.41\,s), \texttt{7-6-3} (0.68\,s vs.\ 27.83\,s), and \texttt{9-4-6} (2.91\,s vs.\ 41.04\,s), because it creates $O(w g s n)$ order variables plus sequential-counter \texttt{AllDifferent} clauses. The only CaDiCaL case among the 20 shared instances where Order Encoding is faster is \texttt{5-5-6} (0.94\,s vs.\ 1.84\,s for \texttt{NSC}+CaDiCaL, though \texttt{NSC}+Glucose finishes in 0.62\,s).
+
+\paragraph{Symmetry-Breaking Scope.}
+Static \texttt{SB1} and \texttt{SB2} constraints are already implemented in \texttt{src/symmetry.py}, \texttt{src/cp\_solver.py}, and \texttt{src/ilp\_solver.py} (and \texttt{sb1} is also supported in \texttt{src/order\_encoder.py}). To compare the base formulations fairly first, all 768 benchmark runs in \texttt{benchmarks/results.csv} use \texttt{SB=none}. Running a follow-up test comparing \texttt{SB=none}, \texttt{sb1}, and \texttt{full} is an important next step, especially for proving the eight UNSAT instances and solving larger multi-week inputs.
 
 \section{Conclusion}
 \label{sec:conclusion}
 
-The three-index SAT model supports four interchangeable CNF encodings
-for the group-size equality. The measured formulas illustrate a
-trade-off between auxiliary variables and clauses: in the four
-structural examples, NSC uses the fewest auxiliary variables and
-Sequential Counter emits the fewest clauses.
-The SAT screen confirmed 102 satisfiable configurations across 15 distinct instances. All decided cases agreed with the known source statuses. A larger evaluation requires resources to build the skipped formulas and a longer time budget for undecided runs.
-The 60-second shared benchmark also confirmed 240 satisfiable SAT
-configurations across 33 instances.
-The ILP baseline, Order Encoding, and symmetry breaking are implemented
-and described in Sections~\ref{sec:ilp_formulation},
-\ref{sec:order_encoding}, and~\ref{sec:symmetry_breaking}; their
-controlled comparison with the SAT encodings and with exact CP still
-requires additional controlled runs for the symmetry variants.
+In this project, we built and tested a shared benchmark pipeline for four exact approaches to the Social Golfer Problem: three-index one-hot SAT with four \textit{Exactly}-$s$ encodings, Order Encoding, OR-Tools CP-SAT, and Gurobi~14.0 ILP. Across 768 single-threaded runs on 64 active instances with \texttt{SB=none} and a 60-second limit, our results show clear differences between the methods:
+\begin{enumerate}[label=(\arabic*),noitemsep]
+    \item Among the C2 encodings, \texttt{NSC} produces the smallest variable count ($5.9\times$ fewer variables than \texttt{Cardinality Network} on common CaDiCaL runs), gives the fastest average runtime (2.41\,s on CaDiCaL), and solves the most instances overall (32 on Glucose~4.1).
+    \item Three-index Direct SAT outperforms slot-based Order Encoding in both size ($12.4\times$ fewer variables on shared cases) and speed ($6.6\times$ faster on average, reaching $n=153$ instead of $n=66$).
+    \item Across the three solver families, SAT handles tightly constrained multi-week instances best (uniquely solving \texttt{8-3-10}, \texttt{6-5-5}, and \texttt{9-3-11}), Gurobi ILP is fastest on tiny problems before $O(n^2 g w)$ linearization variables slow down search, and OR-Tools CP-SAT reaches the largest player count (\texttt{19-10-2}, $n=190$ in 36.10\,s) when CNF formulas pass the 5M-clause guard.
+\end{enumerate}
+
+\paragraph{Limitations and Future Work.}
+First, keeping \texttt{SB=none} in the 768-run suite leaves the non-precheck UNSAT instances undecided after 60\,s; testing \texttt{none}/\texttt{sb1}/\texttt{full} symmetry breaking and running CP-SAT on the two disabled large cases (\texttt{11-11-12} and \texttt{13-13-14}) are direct next steps. Second, replacing pairwise four-literal C3 clauses with auxiliary pair variables could help CNF encodings avoid hitting the 5M-clause limit on large $n$. Finally, IBM CPLEX CP/MIP backends are not yet added to the codebase and are left for future comparison.
 
 \section*{Group Contributions and Acknowledgments}
 This project is a collaboration among three students for course INT3011E (Advanced Topics in Computer Science) at VNU University of Engineering and Technology under the supervision of Dr.~To Van Khanh:
 \begin{itemize}[noitemsep]
-    \item \textbf{Do Huy Hieu (Member 1)}: Universal Solution Verifier, schedule display, shared CLI and DIMACS exporter, OR-Tools CP-SAT model, \texttt{cnsplots} visualization, and paper editing (Abstract, Introduction, CP formulation, Experiments, Conclusion).
+    \item \textbf{Do Huy Hieu (Member 1)}: Universal Solution Verifier, schedule display, shared CLI and DIMACS exporter, CSV~v1 serialization and Windows benchmark reliability fixes, OR-Tools CP-SAT model, \texttt{cnsplots} visualization, full 768-run experimental execution, and paper editing (Abstract, Introduction, CP formulation, Pipeline, Experiments, Conclusion).
     \item \textbf{Pham Van Huong (Member 2)}: Three-index one-hot SAT encoding, custom NSC and PySAT \textit{Exactly}-$s$ encodings, isolated PySAT solver runner, dependencies, SAT methodology, the SAT-only screening experiments, and the C2 benchmark analysis.
     \item \textbf{Nguyen Minh Son (Member 3)}: Order Encoding, ILP formulation, symmetry-breaking module, automated benchmark suite, and ILP/Order/Symmetry sections.
 \end{itemize}
-We gratefully acknowledge Dr.~To Van Khanh for his guidance, lectures, and reference research on SGP and Order Encoding.
+We thank Dr.~To Van Khanh for his guidance, lectures, and reference papers on SGP and Order Encoding.
 
 \section*{Data and Code Availability}
 The source code is available in the
@@ -1017,7 +1092,8 @@ figures are archived with
 The input list, result CSV, and its metadata are
 \path{benchmarks/benchmark_instances.csv},
 \path{benchmarks/results.csv}, and \path{benchmarks/results.csv.meta.json}.
-The figure-generation script is \path{benchmarks/plot_cns.py}, which also
+The automated runner is \path{benchmarks/run_all.py}, and the
+figure-generation script is \path{benchmarks/plot_cns.py}, which also
 builds Figure~\ref{fig:c2-benchmark-breakdown} from the saved CSV.
 
 \begin{thebibliography}{99}
