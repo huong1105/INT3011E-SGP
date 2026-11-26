@@ -614,6 +614,198 @@ def plot_direct_vs_order(
     return _save_both_formats(Path(output_dir), "bar_direct_vs_order")
 
 
+def plot_symmetry_breaking(
+    df_none: pd.DataFrame,
+    df_sb1: pd.DataFrame | None,
+    df_full: pd.DataFrame | None,
+    output_dir: str | Path,
+    sat_encoding: str = "nsc",
+    cutoff: float | None = None,
+) -> list[Path]:
+    """Vẽ biểu đồ hai khung so sánh tác động của phá đối xứng (none, sb1, full)."""
+    from matplotlib.patches import Patch
+
+    datasets: dict[str, pd.DataFrame] = {"none": _apply_sb_filter(df_none, "none")}
+    if df_sb1 is not None:
+        datasets["sb1"] = _apply_sb_filter(df_sb1, "sb1")
+    if df_full is not None:
+        datasets["full"] = _apply_sb_filter(df_full, "full")
+
+    if len(datasets) < 2:
+        print("[Warning] Need at least two SB modes; skipping symmetry-breaking comparison plot.")
+        return []
+
+    configs = [
+        ("sat", sat_encoding.lower(), "cadical", f"SAT {C2_ENCODING_LABELS.get(sat_encoding, sat_encoding)}\n(CaDiCaL)"),
+        ("sat", sat_encoding.lower(), "glucose", f"SAT {C2_ENCODING_LABELS.get(sat_encoding, sat_encoding)}\n(Glucose)"),
+        ("order", "order", "cadical", "Order\n(CaDiCaL)"),
+        ("order", "order", "glucose", "Order\n(Glucose)"),
+        ("cp", "", "cp-sat", "CP-SAT"),
+        ("ilp", "", "gurobi", "Gurobi\nILP"),
+    ]
+    sb_styles = {
+        "none": ("SB=none", "#4c72b0"),
+        "sb1": ("SB=sb1", "#dd8452"),
+        "full": ("SB=full (SB1+SB2)", "#55a868"),
+    }
+
+    decided_records: list[dict[str, object]] = []
+    runtime_records: list[dict[str, object]] = []
+
+    for method, enc, solver, cfg_label in configs:
+        solved_by_sb: dict[str, pd.DataFrame] = {}
+        for sb_mode, sub_df in datasets.items():
+            if method == "order" and sb_mode == "full":
+                continue
+            sub = sub_df[
+                (sub_df["method"] == method)
+                & (sub_df["encoding"] == enc)
+                & (sub_df["solver"] == solver)
+            ]
+            if sub.empty:
+                continue
+            solved = _filter_solved(sub, cutoff=cutoff)
+            solved_by_sb[sb_mode] = solved
+            sat_cnt = int((solved["status"] == "SAT").sum())
+            unsat_cnt = int((solved["status"] == "UNSAT").sum())
+            decided_records.append(
+                {
+                    "config": cfg_label,
+                    "sb": sb_mode,
+                    "sat": sat_cnt,
+                    "unsat": unsat_cnt,
+                    "total": sat_cnt + unsat_cnt,
+                }
+            )
+
+        if not solved_by_sb:
+            continue
+        sat_sets = [
+            set(df_mode.loc[df_mode["status"] == "SAT", "instance"])
+            for df_mode in solved_by_sb.values()
+        ]
+        shared_sat = set.intersection(*sat_sets) if sat_sets else set()
+        if shared_sat:
+            for sb_mode, df_mode in solved_by_sb.items():
+                sat_sub = df_mode[(df_mode["status"] == "SAT") & (df_mode["instance"].isin(shared_sat))]
+                mean_t = float(sat_sub.groupby("instance")["solve_time"].mean().mean())
+                runtime_records.append(
+                    {
+                        "config": cfg_label,
+                        "sb": sb_mode,
+                        "mean_time": mean_t,
+                        "n_shared": len(shared_sat),
+                    }
+                )
+
+    if not decided_records:
+        print("[Warning] No matching configurations for symmetry-breaking comparison plot.")
+        return []
+
+    dec_df = pd.DataFrame(decided_records)
+    rt_df = pd.DataFrame(runtime_records)
+    cfg_labels = [c[3] for c in configs if c[3] in set(dec_df["config"])]
+    modes = [m for m in ("none", "sb1", "full") if m in datasets]
+
+    fig = cns.figure(width=8.6, height=3.8, unit="in")
+    ax1, ax2 = fig.subplots(1, 2)
+
+    width = 0.25
+    x_pos = {lbl: idx for idx, lbl in enumerate(cfg_labels)}
+    cfg_modes_dec = {
+        lbl: [m for m in modes if m in set(dec_df.loc[dec_df["config"] == lbl, "sb"])]
+        for lbl in cfg_labels
+    }
+
+    def _bar_x(cfg_label: str, sb_mode: str) -> float:
+        present = cfg_modes_dec[cfg_label]
+        idx = present.index(sb_mode)
+        return x_pos[cfg_label] + (idx - (len(present) - 1) / 2.0) * width
+
+    # Panel (a): Solver-decided instances (solid SAT + hatched solver-proved UNSAT)
+    max_dec = int(dec_df["total"].max())
+    for row in dec_df.itertuples(index=False):
+        x = _bar_x(row.config, row.sb)
+        _, color = sb_styles[row.sb]
+        if row.sat > 0:
+            ax1.bar(x, row.sat, width=width * 0.9, color=color, edgecolor="white", linewidth=0.5)
+        if row.unsat > 0:
+            ax1.bar(
+                x,
+                row.unsat,
+                bottom=row.sat,
+                width=width * 0.9,
+                color=color,
+                alpha=0.45,
+                hatch="///",
+                edgecolor=color,
+                linewidth=0.7,
+            )
+        ax1.text(
+            x,
+            row.total + 0.6,
+            str(row.total),
+            ha="center",
+            va="bottom",
+            fontsize=6.8,
+            color="#222222",
+        )
+
+    ax1.set_xticks(range(len(cfg_labels)), cfg_labels, fontsize=7.5)
+    ax1.set_ylim(0, max_dec * 1.18)
+    ax1.set_ylabel("Solver-Decided Instances (Excl. Precheck)")
+    ax1.set_title("(a) Solved Coverage: SAT (solid) + UNSAT (hatched)", fontsize=9.5, pad=8)
+    ax1.set_axisbelow(True)
+    ax1.grid(axis="y", linestyle="--", alpha=0.35)
+
+    # Panel (b): Mean total time across shared solved SAT instances
+    max_rt = float(rt_df["mean_time"].max()) if not rt_df.empty else 1.0
+    for row in rt_df.itertuples(index=False):
+        x = _bar_x(row.config, row.sb)
+        _, color = sb_styles[row.sb]
+        ax2.bar(x, row.mean_time, width=width * 0.9, color=color, edgecolor="white", linewidth=0.5)
+        ax2.text(
+            x,
+            row.mean_time + max_rt * 0.02,
+            f"{row.mean_time:.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=6.6,
+            rotation=90,
+            color="#222222",
+        )
+
+    ax2.set_xticks(range(len(cfg_labels)), cfg_labels, fontsize=7.5)
+    ax2.set_ylim(0, max_rt * 1.24)
+    ax2.set_ylabel("Mean Total Time on Shared SAT (s)")
+    ax2.set_title("(b) Paired Mean Runtime on Shared Solved SAT", fontsize=9.5, pad=8)
+    ax2.set_axisbelow(True)
+    ax2.grid(axis="y", linestyle="--", alpha=0.35)
+
+    legend_handles = [
+        Patch(facecolor=sb_styles[m][1], edgecolor="none", label=sb_styles[m][0])
+        for m in modes
+    ]
+    legend_handles.append(
+        Patch(
+            facecolor="#d9d9d9",
+            edgecolor="#555555",
+            hatch="///",
+            label="Hatched top = solver-proved UNSAT",
+        )
+    )
+    fig.legend(
+        handles=legend_handles,
+        loc="upper center",
+        ncols=len(legend_handles),
+        frameon=False,
+        fontsize=8,
+    )
+    fig.subplots_adjust(left=0.07, right=0.985, bottom=0.18, top=0.81, wspace=0.22)
+
+    return _save_both_formats(Path(output_dir), "bar_symmetry_breaking")
+
+
 def build_demo_dataframe() -> pd.DataFrame:
     """Tạo dữ liệu mẫu theo đúng chuẩn 13 cột CSV benchmark v1."""
     instances = [
@@ -850,6 +1042,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Symmetry breaking mode (defaults to benchmark metadata or none)",
     )
     parser.add_argument(
+        "--sb1-input",
+        type=str,
+        default=None,
+        help="Optional CSV path for SB=sb1 results to generate bar_symmetry_breaking",
+    )
+    parser.add_argument(
+        "--sb-full-input",
+        type=str,
+        default=None,
+        help="Optional CSV path for SB=full results to generate bar_symmetry_breaking",
+    )
+    parser.add_argument(
+        "--sb-only",
+        action="store_true",
+        help="Only export bar_symmetry_breaking without regenerating baseline figures",
+    )
+    parser.add_argument(
         "--cutoff",
         type=float,
         default=None,
@@ -876,14 +1085,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             df = load_results(args.input, time_col=args.time_col)
 
-        saved_files = generate_all_plots(
-            df,
-            output_dir=args.output_dir,
-            sat_encoding=args.sat_encoding,
-            sat_solver=args.sat_solver,
-            sb=args.sb,
-            cutoff=args.cutoff,
-        )
+        saved_files: list[Path] = []
+        if not args.sb_only:
+            saved_files.extend(
+                generate_all_plots(
+                    df,
+                    output_dir=args.output_dir,
+                    sat_encoding=args.sat_encoding,
+                    sat_solver=args.sat_solver,
+                    sb=args.sb,
+                    cutoff=args.cutoff,
+                )
+            )
+        if args.sb1_input or args.sb_full_input:
+            df_sb1 = load_results(args.sb1_input, time_col=args.time_col) if args.sb1_input else None
+            df_full = (
+                load_results(args.sb_full_input, time_col=args.time_col) if args.sb_full_input else None
+            )
+            saved_files.extend(
+                plot_symmetry_breaking(
+                    df,
+                    df_sb1,
+                    df_full,
+                    output_dir=args.output_dir,
+                    sat_encoding=args.sat_encoding,
+                    cutoff=args.cutoff,
+                )
+            )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
 

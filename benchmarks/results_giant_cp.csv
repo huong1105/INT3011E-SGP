@@ -1,0 +1,3 @@
+instance,n,method,encoding,solver,status,encode_time_seconds,solver_wall_time_seconds,total_time_seconds,num_vars,num_clauses,num_constraints,error
+11-11-12,121,cp,,cp-sat,TIMEOUT,1.2936844999999266,60.1162603,61.476438800000324,91476,,184538,CP-SAT exceeded 60 seconds
+13-13-14,169,cp,,cp-sat,TIMEOUT,2.845350900000085,61.746899400000004,64.6621895000003,205842,,416600,CP-SAT exceeded 60 seconds

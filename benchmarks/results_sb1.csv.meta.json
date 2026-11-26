@@ -1,0 +1,6 @@
+{
+  "sb": "sb1",
+  "timeout_seconds": 60.0,
+  "timeout_scope": "total",
+  "num_threads": 1
+}

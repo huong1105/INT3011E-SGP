@@ -1,0 +1,6 @@
+{
+  "sb": "full",
+  "timeout_seconds": 60.0,
+  "timeout_scope": "solver",
+  "num_threads": 1
+}
