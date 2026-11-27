@@ -56,10 +56,65 @@ def _format_solver_name(solver: str) -> str:
     return SOLVER_DISPLAY_NAMES.get(key, solver.strip() or "unknown")
 
 
-def _format_sat_label(sat_solver: str) -> str:
-    """Trả về nhãn hiển thị cho nhánh SAT theo solver được chọn."""
+def _format_sat_label(sat_solver: str, sat_encoding: str | None = None) -> str:
+    """Trả về nhãn hiển thị cho nhánh SAT theo solver và mã hóa C2 được chọn."""
     key = sat_solver.strip().lower()
+    if sat_encoding:
+        enc_key = sat_encoding.strip().lower()
+        enc_label = C2_ENCODING_LABELS.get(enc_key, sat_encoding.strip().upper())
+        return f"SAT ({enc_label} + {_format_solver_name(sat_solver)})"
     return METHOD_SOLVER_LABELS.get(("sat", key), f"SAT ({_format_solver_name(sat_solver)})")
+
+
+def _take_line_legend_out(
+    ax: plt.Axes,
+    title: str | None = None,
+    handlelength: float = 2.4,
+    markerscale: float = 0.95,
+) -> None:
+    """Đưa legend ra ngoài vùng vẽ với nét liền rõ ràng và marker sắc nét."""
+    from matplotlib.lines import Line2D
+
+    legend = ax.get_legend()
+    handles = None
+    labels = None
+    if legend is not None:
+        raw_handles = legend.legend_handles
+        labels = [t.get_text() for t in legend.texts]
+        if title is None:
+            title = legend.get_title().get_text()
+        handles = []
+        for h in raw_handles:
+            if isinstance(h, Line2D):
+                color = h.get_color()
+                handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        color=color,
+                        linestyle="-",
+                        linewidth=max(h.get_linewidth(), 1.6),
+                        marker=h.get_marker(),
+                        markersize=max(h.get_markersize(), 5.5),
+                        markerfacecolor=color,
+                        markeredgecolor=color,
+                        markeredgewidth=0.6,
+                    )
+                )
+            else:
+                handles.append(h)
+    if title is None:
+        title = ""
+    ax.legend(
+        handles=handles,
+        labels=labels,
+        bbox_to_anchor=cns.settings.legend_out_bbox_to_anchor,
+        loc=cns.settings.legend_out_loc,
+        title=title,
+        handlelength=handlelength,
+        markerscale=markerscale,
+        frameon=False,
+    )
 
 
 TIME_COLUMN_CANDIDATES = (
@@ -320,8 +375,13 @@ def plot_cactus(
     selected = _apply_sb_filter(df, sb)
     attempted = selected["status"].isin({"SAT", "UNSAT", "TIMEOUT"}) & selected["instance"].ne("")
     attempts = selected[attempted]
-    sat_label = _format_sat_label(sat_solver)
     sat = _representative_sat(selected, sat_encoding, sat_solver)
+    used_enc = (
+        sat_encoding
+        if (not sat.empty and (sat["encoding"] == sat_encoding.lower()).any())
+        else None
+    )
+    sat_label = _format_sat_label(sat_solver, used_enc)
     groups = {sat_label: sat[attempted.loc[sat.index]]}
     if groups[sat_label].empty:
         print(f"[Warning] No attempted cases for {sat_label}; skipping the three-method cactus plot.")
@@ -387,13 +447,17 @@ def plot_cactus(
     ax.set_yscale("log")
     ax.set_xlabel("Number of Solved Instances")
     ax.set_ylabel(_time_axis_label(df, mean=False))
-    title = f"Cactus Plot ({len(common)} Shared SGP Instances)"
+    active_sb = df.attrs.get("benchmark_sb") or (
+        selected["sb"].iloc[0] if not selected.empty and selected["sb"].iloc[0] else ""
+    )
+    sb_suffix = f", SB={active_sb}" if active_sb else ""
+    title = f"Cactus Plot ({len(common)} Shared SGP Instances{sb_suffix})"
     zero_solved = [label for label in groups if counts[label] == 0]
     if zero_solved:
         title += "\nNo solved cases: " + ", ".join(zero_solved)
     ax.set_title(title)
     ax.grid(True, which="both", linestyle="--", alpha=0.35)
-    cns.take_legend_out()
+    _take_line_legend_out(ax)
 
     return _save_both_formats(Path(output_dir), "cactus_sat_cp_ilp")
 
@@ -467,7 +531,26 @@ def plot_c2_encodings(
         solver_name = f"{solver_name}, SB={active_sb}"
     ax.set_title(f"C2 Exactly-s Encodings Comparison ({solver_name})")
     ax.grid(True, which="both", linestyle="--", alpha=0.35)
-    cns.take_legend_out()
+
+    inst_counts = per_instance.groupby("n")["instance"].nunique()
+    multi_n = inst_counts[inst_counts > 1]
+    if not multi_n.empty:
+        multi_note = "Multi-instance means: " + ", ".join(
+            f"n={int(n_val)} ({int(cnt)})" for n_val, cnt in multi_n.items()
+        )
+        ax.text(
+            0.985,
+            0.03,
+            multi_note,
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=6.8,
+            color="#333333",
+            bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "#cccccc", "alpha": 0.9},
+        )
+
+    _take_line_legend_out(ax)
 
     return _save_both_formats(Path(output_dir), "runtime_c2_encodings")
 
@@ -551,30 +634,32 @@ def plot_direct_vs_order(
     sat_encoding: str = "nsc",
     sat_solver: str = "cadical",
     sb: str | None = None,
-    max_instances: int = 12,
+    max_instances: int | None = None,
     cutoff: float | None = None,
 ) -> list[Path]:
-    """Vẽ Bar Plot so sánh Direct và Order Encoding."""
+    """Vẽ biểu đồ Cleveland dot/dumbbell trục log so sánh Direct và Order Encoding."""
     selected = _apply_sb_filter(df, sb)
     solved = _filter_solved(selected, cutoff=cutoff)
     direct = _filter_solved(_representative_sat(selected, sat_encoding, sat_solver), cutoff=cutoff)
-    direct["Approach"] = f"Direct ({C2_ENCODING_LABELS.get(sat_encoding, sat_encoding)})"
+    direct_label = f"Direct ({C2_ENCODING_LABELS.get(sat_encoding, sat_encoding)})"
+    direct["Approach"] = direct_label
 
     order = solved[
         (solved["method"] == "order") & (solved["solver"] == sat_solver.lower())
     ].copy()
-    order["Approach"] = "Order Encoding"
+    order_label = "Order Encoding"
+    order["Approach"] = order_label
 
     if direct.empty or order.empty:
         print(
-            "[Warning] Missing Direct or Order Encoding data; skipping Direct vs. Order bar plot."
+            "[Warning] Missing Direct or Order Encoding data; skipping Direct vs. Order plot."
         )
         return []
 
     common_instances = (set(direct["instance"]) & set(order["instance"])) - {""}
     if not common_instances:
         print(
-            "[Warning] No common instances between Direct and Order Encoding; skipping bar plot."
+            "[Warning] No common instances between Direct and Order Encoding; skipping plot."
         )
         return []
 
@@ -585,31 +670,90 @@ def plot_direct_vs_order(
         "solve_time"
     ].mean()
 
-    inst_order = (
+    inst_meta = (
         combined[["instance", "n"]]
         .drop_duplicates()
-        .sort_values(["n", "instance"], na_position="last")["instance"]
-        .tolist()[:max_instances]
+        .sort_values(["n", "instance"], na_position="last")
     )
-    combined = combined[combined["instance"].isin(inst_order)]
+    if max_instances is not None:
+        inst_meta = inst_meta.head(max_instances)
+    inst_order = inst_meta["instance"].tolist()
+    pivot = (
+        combined[combined["instance"].isin(inst_order)]
+        .pivot(index="instance", columns="Approach", values="solve_time")
+        .reindex(inst_order)
+    )
 
-    cns.figure(width=6.0, height=3.8, unit="in", color_cycle="Lancet")
-    ax = cns.barplot(
-        data=combined,
-        x="instance",
-        y="solve_time",
-        hue="Approach",
-        order=inst_order,
-        errorbar=None,
+    y_labels = [
+        f"{row.instance} (n={int(row.n)})" if pd.notna(row.n) else str(row.instance)
+        for row in inst_meta.itertuples(index=False)
+    ]
+    y_positions = list(range(len(inst_order)))
+
+    fig_height = max(3.4, 0.195 * len(inst_order) + 0.95)
+    fig = cns.figure(width=6.4, height=fig_height, unit="in")
+    ax = fig.subplots()
+
+    direct_color = "#00468B"
+    order_color = "#ED0000"
+    for idx, inst in enumerate(inst_order):
+        t_dir = float(pivot.loc[inst, direct_label])
+        t_ord = float(pivot.loc[inst, order_label])
+        ax.plot([t_dir, t_ord], [idx, idx], color="#9aa5b4", linewidth=1.35, zorder=2)
+
+    ax.scatter(
+        pivot[direct_label].to_numpy(dtype=float),
+        y_positions,
+        color=direct_color,
+        marker="o",
+        s=34,
+        label=direct_label,
+        zorder=3,
     )
-    ax.set_yscale("log")
-    ax.set_xlabel("SGP Instance (g-p-w)")
-    ax.set_ylabel(_time_axis_label(df, mean=False))
+    ax.scatter(
+        pivot[order_label].to_numpy(dtype=float),
+        y_positions,
+        color=order_color,
+        marker="D",
+        s=32,
+        label=order_label,
+        zorder=3,
+    )
+
+    ax.set_xscale("log")
+    min_t = float(pivot.min().min())
+    max_t = float(pivot.max().max())
+    candidate_ticks = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]
+    visible_ticks = [t for t in candidate_ticks if min_t * 0.85 <= t <= max_t * 1.35]
+    if len(visible_ticks) >= 3:
+        ax.set_xticks(visible_ticks)
+        ax.set_xticklabels([f"{t:g}" for t in visible_ticks])
+    ax.set_yticks(y_positions, y_labels, fontsize=7.6)
+    ax.invert_yaxis()
+    ax.set_xlabel(_time_axis_label(df, mean=False))
+    ax.set_ylabel("SGP Instance (g-p-w)")
+
     solver_name = _format_solver_name(sat_solver)
-    ax.set_title(f"Direct vs. Order Encoding Runtime ({solver_name})")
-    ax.tick_params(axis="x", rotation=35)
-    ax.grid(True, axis="y", which="both", linestyle="--", alpha=0.35)
-    cns.take_legend_out()
+    active_sb = df.attrs.get("benchmark_sb") or (
+        selected["sb"].iloc[0] if not selected.empty and selected["sb"].iloc[0] else ""
+    )
+    if active_sb:
+        solver_name = f"{solver_name}, SB={active_sb}"
+    ax.set_title(
+        f"Direct vs. Order Encoding Runtime ({solver_name}, {len(inst_order)} Shared Instances)",
+        pad=22,
+    )
+    ax.set_axisbelow(True)
+    ax.grid(True, axis="x", which="both", linestyle="--", alpha=0.35)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.28)
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.005),
+        ncols=2,
+        frameon=False,
+        fontsize=8,
+        markerscale=1.0,
+    )
 
     return _save_both_formats(Path(output_dir), "bar_direct_vs_order")
 
@@ -707,7 +851,7 @@ def plot_symmetry_breaking(
     cfg_labels = [c[3] for c in configs if c[3] in set(dec_df["config"])]
     modes = [m for m in ("none", "sb1", "full") if m in datasets]
 
-    fig = cns.figure(width=8.6, height=3.8, unit="in")
+    fig = cns.figure(width=8.8, height=4.0, unit="in")
     ax1, ax2 = fig.subplots(1, 2)
 
     width = 0.25
@@ -728,7 +872,7 @@ def plot_symmetry_breaking(
         x = _bar_x(row.config, row.sb)
         _, color = sb_styles[row.sb]
         if row.sat > 0:
-            ax1.bar(x, row.sat, width=width * 0.9, color=color, edgecolor="white", linewidth=0.5)
+            ax1.bar(x, row.sat, width=width * 0.9, color=color, edgecolor="none")
         if row.unsat > 0:
             ax1.bar(
                 x,
@@ -763,7 +907,7 @@ def plot_symmetry_breaking(
     for row in rt_df.itertuples(index=False):
         x = _bar_x(row.config, row.sb)
         _, color = sb_styles[row.sb]
-        ax2.bar(x, row.mean_time, width=width * 0.9, color=color, edgecolor="white", linewidth=0.5)
+        ax2.bar(x, row.mean_time, width=width * 0.9, color=color, edgecolor="none")
         ax2.text(
             x,
             row.mean_time + max_rt * 0.02,
@@ -775,7 +919,14 @@ def plot_symmetry_breaking(
             color="#222222",
         )
 
-    ax2.set_xticks(range(len(cfg_labels)), cfg_labels, fontsize=7.5)
+    n_sh_map = (
+        rt_df.groupby("config")["n_shared"].first().to_dict() if not rt_df.empty else {}
+    )
+    rt_tick_labels = [
+        f"{lbl}\n($n_{{\\mathrm{{sh}}}}={int(n_sh_map[lbl])}$)" if lbl in n_sh_map else lbl
+        for lbl in cfg_labels
+    ]
+    ax2.set_xticks(range(len(cfg_labels)), rt_tick_labels, fontsize=7.3)
     ax2.set_ylim(0, max_rt * 1.24)
     ax2.set_ylabel("Mean Total Time on Shared SAT (s)")
     ax2.set_title("(b) Paired Mean Runtime on Shared Solved SAT", fontsize=9.5, pad=8)
@@ -801,7 +952,7 @@ def plot_symmetry_breaking(
         frameon=False,
         fontsize=8,
     )
-    fig.subplots_adjust(left=0.07, right=0.985, bottom=0.18, top=0.81, wspace=0.22)
+    fig.subplots_adjust(left=0.07, right=0.985, bottom=0.22, top=0.81, wspace=0.22)
 
     return _save_both_formats(Path(output_dir), "bar_symmetry_breaking")
 
